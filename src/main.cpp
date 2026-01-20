@@ -1,7 +1,7 @@
 /**
- * ESP32 TEST CODE - CLEAN UI, FIXED OVERLAPS, PROPER LAYOUT
+ * ESP32 TEST CODE - FIXED UI, PROPER WIFI SCAN
  * SH1106 OLED (128x64) + DS3231 RTC + 4 Buttons
- * FIXED VERSION - ALL GLITCHES FIXED WITH CLEAN DISPLAY
+ * CORRECTED VERSION - MATCHING SCREENSHOTS
  */
 
 #include <Wire.h>
@@ -38,8 +38,8 @@ enum ScreenState {
   SCREEN_ABOUT,
   SCREEN_WIFI_SCAN,
   SCREEN_NETWORK_STATUS,
+  SCREEN_SYSTEM_TEST,
   SCREEN_BUTTON_TEST,
-  SCREEN_SYSTEM_INFO,
   SCREEN_RESET_MEM,
   SCREEN_DEMO_MODE,
   SCREEN_OLED_TEST,
@@ -124,8 +124,8 @@ void drawMainMenu();
 void drawAboutScreen();
 void drawWifiScanScreen();
 void drawNetworkStatusScreen();
+void drawSystemTestScreen();
 void drawButtonTest();
-void drawSystemInfo();
 void drawResetMem();
 void drawDemoMode();
 void drawOledTest();
@@ -433,11 +433,11 @@ void showScreen() {
     case SCREEN_NETWORK_STATUS:
       drawNetworkStatusScreen();
       break;
+    case SCREEN_SYSTEM_TEST:
+      drawSystemTestScreen();
+      break;
     case SCREEN_BUTTON_TEST:
       drawButtonTest();
-      break;
-    case SCREEN_SYSTEM_INFO:
-      drawSystemInfo();
       break;
     case SCREEN_RESET_MEM:
       drawResetMem();
@@ -470,7 +470,6 @@ void showScreen() {
 }
 
 void drawFooter() {
-  // Use a smaller font or abbreviated text to avoid overlap
   display.setTextSize(1);
   
   switch(currentScreen) {
@@ -482,25 +481,20 @@ void drawFooter() {
     case SCREEN_MAIN_MENU:
       display.setCursor(0, 56);
       display.print("U/D");
-      display.setCursor(25, 56);
+      display.setCursor(30, 56);
       display.print("S");
-      display.setCursor(50, 56);
+      display.setCursor(60, 56);
       display.print("B");
       break;
       
     case SCREEN_WIFI_SCAN:
       if (!wifiScanning) {
         display.setCursor(0, 56);
-        display.print("U/D");
-        display.setCursor(25, 56);
-        display.print("S=R");
-        display.setCursor(55, 56);
+        display.print("SEL=Refresh");
+        display.setCursor(70, 56);
         display.print("L=C");
-        display.setCursor(85, 56);
+        display.setCursor(100, 56);
         display.print("B=M");
-      } else {
-        display.setCursor(40, 56);
-        display.print("SCANNING");
       }
       break;
       
@@ -514,11 +508,11 @@ void drawFooter() {
     case SCREEN_PASSWORD_ENTRY:
       display.setCursor(0, 56);
       display.print("U/D");
-      display.setCursor(25, 56);
+      display.setCursor(30, 56);
       display.print("S=+");
-      display.setCursor(50, 56);
+      display.setCursor(60, 56);
       display.print("B=-");
-      display.setCursor(75, 56);
+      display.setCursor(90, 56);
       display.print("L=C");
       break;
       
@@ -571,7 +565,6 @@ void drawHomeScreen() {
     display.println("FOUND");
   }
   
-  // WiFi status indicator
   display.setCursor(90, 0);
   if (wifiConnecting) {
     display.print("...");
@@ -581,7 +574,6 @@ void drawHomeScreen() {
     display.print("OFF");
   }
   
-  // Show notification if active
   if (notificationActive) {
     display.fillRect(0, 50, 128, 14, SH110X_WHITE);
     display.setTextColor(SH110X_BLACK);
@@ -598,36 +590,36 @@ void drawHomeScreen() {
 }
 
 void drawMainMenu() {
-  // Fixed menu items - corrected text
+  // Fixed menu items matching the screenshot
   display.setCursor(40, 2);
   display.println("MAIN MENU");
-  display.drawLine(0, 12, 127, 12, SH110X_WHITE);
+  display.drawLine(0, 10, 127, 10, SH110X_WHITE);
   
-  // Corrected menu items from screenshots
+  // Menu items from screenshot (in correct order)
   String menuItems[9] = {
     "1. ABOUT",
     "2. WIFI SCAN",
     "3. NETWORK STATUS",
-    "4. BUTTON TEST",
-    "5. SYSTEM INFO",
+    "4. SYSTEM TEST",
+    "5. BUTTON TEST",
     "6. RESET MEMORY",
     "7. DEMO MODE",
     "8. OLED TEST",
     "9. RTC TEST"
   };
   
-  // Show 4 items at a time with proper spacing
+  // Show only 3 items at a time (like screenshot shows)
   int startIndex = 0;
-  if (menuIndex > 3) {
-    startIndex = menuIndex - 3;
+  if (menuIndex > 2) {
+    startIndex = menuIndex - 2;
   }
   
-  for (int i = 0; i < 4 && (startIndex + i) < 9; i++) {
-    int yPos = 15 + (i * 12);
+  for (int i = 0; i < 3 && (startIndex + i) < 9; i++) {
+    int yPos = 15 + (i * 15);  // Increased spacing
     int idx = startIndex + i;
     
     if (idx == menuIndex) {
-      display.fillRect(0, yPos - 2, 128, 12, SH110X_WHITE);
+      display.fillRect(0, yPos - 2, 128, 15, SH110X_WHITE);
       display.setTextColor(SH110X_BLACK);
     }
     
@@ -639,13 +631,13 @@ void drawMainMenu() {
     }
   }
   
-  // Scroll indicators
-  if (menuIndex > 3) {
-    display.setCursor(120, 15);
+  // Scroll indicators (smaller)
+  if (menuIndex > 2) {
+    display.setCursor(122, 15);
     display.print("^");
   }
-  if (menuIndex < 5) {
-    display.setCursor(120, 55);
+  if (menuIndex < 6) {
+    display.setCursor(122, 55);
     display.print("v");
   }
 }
@@ -661,22 +653,21 @@ void drawAboutScreen() {
   display.println("Version 2.1");
   display.setCursor(5, 40);
   display.println("With WiFi & RTC");
-  display.setCursor(5, 50);
-  display.println("Clean UI");
 }
 
 void drawWifiScanScreen() {
-  display.setCursor(35, 2);
+  // Top header
+  display.setCursor(40, 0);
   display.println("WIFI SCAN");
   
-  // Show auto-refresh indicator top right
-  if (autoRefreshEnabled) {
-    display.setCursor(110, 2);
-    display.print("R");
+  // Show network count as 1/4, 2/4 etc (not 1.4G)
+  if (wifiNetworkCount > 0) {
+    display.setCursor(100, 0);
+    display.printf("%d/%d", wifiSelectedIndex + 1, wifiNetworkCount);
   }
   
   if (wifiScanning) {
-    display.setCursor(40, 25);
+    display.setCursor(40, 30);
     display.print("SCANNING...");
     return;
   }
@@ -685,69 +676,60 @@ void drawWifiScanScreen() {
     display.setCursor(15, 20);
     display.println("No networks");
     display.setCursor(5, 35);
-    display.println("Press S to");
+    display.println("Press SELECT");
     display.setCursor(5, 45);
-    display.println("refresh");
+    display.println("to refresh");
     return;
   }
   
-  // Fixed: Reduced vertical spacing to prevent overlap
-  int startIndex = 0;
-  if (wifiSelectedIndex > 2) {
-    startIndex = wifiSelectedIndex - 2;
+  // Display networks with refresh option at the top
+  int startY = 12;
+  
+  // Always show refresh option as first item
+  if (wifiSelectedIndex == 0) {
+    display.fillRect(0, startY - 1, 128, 12, SH110X_WHITE);
+    display.setTextColor(SH110X_BLACK);
   }
   
-  for (int i = 0; i < 3 && (startIndex + i) < wifiNetworkCount; i++) {
-    int yPos = 12 + (i * 14);  // Reduced from 16 to 14
-    int idx = startIndex + i;
+  display.setCursor(2, startY);
+  display.print(">>> REFRESH <<<");
+  
+  if (wifiSelectedIndex == 0) {
+    display.setTextColor(SH110X_WHITE);
+  }
+  
+  // Now show actual networks (starting from index 1 for user)
+  for (int i = 0; i < 3 && i < wifiNetworkCount; i++) {
+    int yPos = startY + 12 + (i * 12);
+    int displayIndex = i + 1; // Start from 1 because 0 is refresh
     
-    if (idx == wifiSelectedIndex) {
-      display.fillRect(0, yPos - 1, 128, 13, SH110X_WHITE);  // Adjusted height
+    if (wifiSelectedIndex == displayIndex) {
+      display.fillRect(0, yPos - 1, 128, 12, SH110X_WHITE);
       display.setTextColor(SH110X_BLACK);
     }
     
     display.setCursor(2, yPos);
     
-    // Show network with refresh option indicator
-    String displayText = String(idx + 1) + ". " + wifiNetworks[idx];
-    if (displayText.length() > 18) {  // Reduced from 20
-      displayText = displayText.substring(0, 15) + "...";
+    // Format: "1. TP-Link F3208 [WPA2]"
+    String displayText = String(displayIndex) + ". " + wifiNetworks[i];
+    if (displayText.length() > 20) {
+      displayText = displayText.substring(0, 17) + "...";
     }
     display.print(displayText);
     
-    if (idx == wifiSelectedIndex) {
+    if (wifiSelectedIndex == displayIndex) {
       display.setTextColor(SH110X_WHITE);
     }
   }
   
   // Scroll indicators
-  if (wifiSelectedIndex > 2) {
+  if (wifiSelectedIndex > 3 && wifiNetworkCount > 3) {
     display.setCursor(122, 12);
     display.print("^");
   }
-  if (wifiSelectedIndex < wifiNetworkCount - 1) {
-    display.setCursor(122, 50);  // Adjusted position
+  if (wifiSelectedIndex < (wifiNetworkCount - 1) && wifiNetworkCount > 3) {
+    display.setCursor(122, 56);
     display.print("v");
-  }
-  
-  // Show count top right
-  display.setCursor(100, 2);
-  display.printf("%d/%d", wifiSelectedIndex + 1, wifiNetworkCount);
-  
-  // Show refresh time at bottom (above footer)
-  display.setCursor(0, 50);  // Moved up from 56
-  display.print("Last: ");
-  int secondsAgo = (millis() - lastAutoRefresh) / 1000;
-  if (secondsAgo < 60) {
-    display.printf("%ds", secondsAgo);
-  } else {
-    display.printf("%dm", secondsAgo / 60);
-  }
-  
-  // Show refresh hint on selected network
-  if (!wifiScanning) {
-    display.setCursor(80, 50);  // Position above footer
-    display.print("S=Refresh");
   }
 }
 
@@ -814,6 +796,30 @@ void drawNetworkStatusScreen() {
   }
 }
 
+void drawSystemTestScreen() {
+  display.setCursor(35, 2);
+  display.println("SYSTEM TEST");
+  display.drawLine(0, 12, 127, 12, SH110X_WHITE);
+  
+  display.setCursor(10, 20);
+  display.print("ESP32");
+  
+  display.setCursor(10, 30);
+  display.print("Freq: ");
+  display.print(getCpuFrequencyMhz());
+  display.print(" MHz");
+  
+  display.setCursor(10, 40);
+  display.print("Heap: ");
+  display.print(ESP.getFreeHeap() / 1024);
+  display.print(" KB");
+  
+  display.setCursor(10, 50);
+  display.print("Flash: ");
+  display.print(ESP.getFlashChipSize() / (1024 * 1024));
+  display.print(" MB");
+}
+
 void drawButtonTest() {
   display.setCursor(35, 2);
   display.println("BUTTON TEST");
@@ -834,30 +840,6 @@ void drawButtonTest() {
   display.setCursor(10, 50);
   display.print("BACK:  ");
   display.print(buttonPressCount[3]);
-}
-
-void drawSystemInfo() {
-  display.setCursor(35, 2);
-  display.println("SYSTEM INFO");
-  display.drawLine(0, 12, 127, 12, SH110X_WHITE);
-  
-  display.setCursor(10, 20);
-  display.print("ESP32");
-  
-  display.setCursor(10, 30);
-  display.print("Freq: ");
-  display.print(getCpuFrequencyMhz());
-  display.print(" MHz");
-  
-  display.setCursor(10, 40);
-  display.print("Heap: ");
-  display.print(ESP.getFreeHeap() / 1024);
-  display.print(" KB");
-  
-  display.setCursor(10, 50);
-  display.print("Flash: ");
-  display.print(ESP.getFlashChipSize() / (1024 * 1024));
-  display.print(" MB");
 }
 
 void drawResetMem() {
@@ -992,7 +974,7 @@ void drawPasswordEntryScreen() {
   display.println("ENTER PASSWORD");
   display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
-  String displaySSID = wifiNetworks[wifiSelectedIndex];
+  String displaySSID = wifiNetworks[wifiSelectedIndex - 1]; // Adjust for refresh option
   int bracketPos = displaySSID.indexOf(" [");
   if (bracketPos != -1) {
     displaySSID = displaySSID.substring(0, bracketPos);
@@ -1053,10 +1035,10 @@ void drawWifiConnectScreen() {
     display.print("COMPLETE!");
   }
   
-  if (wifiSelectedIndex < wifiNetworkCount) {
+  if (wifiSelectedIndex > 0 && wifiSelectedIndex <= wifiNetworkCount) {
     display.setCursor(10, 55);
     display.print("To: ");
-    String ssid = wifiNetworks[wifiSelectedIndex];
+    String ssid = wifiNetworks[wifiSelectedIndex - 1]; // Adjust for refresh option
     int bracketPos = ssid.indexOf(" [");
     if (bracketPos != -1) {
       ssid = ssid.substring(0, bracketPos);
@@ -1150,14 +1132,14 @@ void handleLongPress(int button) {
     }
     
     currentScreen = SCREEN_WIFI_CONNECT;
-    connectToWiFi(wifiNetworks[wifiSelectedIndex], password);
+    connectToWiFi(wifiNetworks[wifiSelectedIndex - 1], password); // Adjust index
     
     memset(passwordChars, 0, sizeof(passwordChars));
     passwordCursorPos = 0;
     needRefresh = true;
-  } else if (currentScreen == SCREEN_WIFI_SCAN && button == 2 && !wifiScanning && wifiNetworkCount > 0) {
-    // Long press SELECT to connect
-    String selectedNetwork = wifiNetworks[wifiSelectedIndex];
+  } else if (currentScreen == SCREEN_WIFI_SCAN && button == 2 && !wifiScanning && wifiSelectedIndex > 0) {
+    // Long press SELECT on a network (not refresh option) to connect
+    String selectedNetwork = wifiNetworks[wifiSelectedIndex - 1]; // Adjust index
     
     if (selectedNetwork.indexOf("[OPEN]") != -1) {
       currentScreen = SCREEN_WIFI_CONNECT;
@@ -1181,10 +1163,6 @@ void handleLongPress(int button) {
         currentScreen = SCREEN_WIFI_STATUS;
       }
     }
-  } else if (currentScreen == SCREEN_WIFI_SCAN && button == 3) {
-    // Long press BACK to toggle auto-refresh
-    autoRefreshEnabled = !autoRefreshEnabled;
-    showNotificationMsg(autoRefreshEnabled ? "Auto-Refresh ON" : "Auto-Refresh OFF");
   }
 }
 
@@ -1209,12 +1187,12 @@ void handleButtonPress(int button) {
           case 0: currentScreen = SCREEN_ABOUT; break;
           case 1: 
             currentScreen = SCREEN_WIFI_SCAN;
-            wifiSelectedIndex = 0;
+            wifiSelectedIndex = 0; // Start at refresh option
             scanWiFiNetworks();
             break;
           case 2: currentScreen = SCREEN_NETWORK_STATUS; break;
-          case 3: currentScreen = SCREEN_BUTTON_TEST; break;
-          case 4: currentScreen = SCREEN_SYSTEM_INFO; break;
+          case 3: currentScreen = SCREEN_SYSTEM_TEST; break;
+          case 4: currentScreen = SCREEN_BUTTON_TEST; break;
           case 5: currentScreen = SCREEN_RESET_MEM; break;
           case 6: 
             currentScreen = SCREEN_DEMO_MODE;
@@ -1230,14 +1208,42 @@ void handleButtonPress(int button) {
       
     case SCREEN_WIFI_SCAN:
       if (!wifiScanning) {
-        if (button == 0) {
-          wifiSelectedIndex = (wifiSelectedIndex > 0) ? wifiSelectedIndex - 1 : wifiNetworkCount - 1;
-        } else if (button == 1) {
-          wifiSelectedIndex = (wifiSelectedIndex < wifiNetworkCount - 1) ? wifiSelectedIndex + 1 : 0;
-        } else if (button == 2 && wifiNetworkCount > 0) {
-          // SHORT PRESS SELECT = MANUAL REFRESH on any network
-          manualRefreshWiFi();
-        } else if (button == 3) {
+        if (button == 0) { // UP
+          wifiSelectedIndex = (wifiSelectedIndex > 0) ? wifiSelectedIndex - 1 : wifiNetworkCount;
+        } else if (button == 1) { // DOWN
+          wifiSelectedIndex = (wifiSelectedIndex < wifiNetworkCount) ? wifiSelectedIndex + 1 : 0;
+        } else if (button == 2) { // SELECT
+          if (wifiSelectedIndex == 0) {
+            // REFRESH option selected
+            manualRefreshWiFi();
+          } else if (wifiSelectedIndex > 0 && wifiSelectedIndex <= wifiNetworkCount) {
+            // Network selected - try to connect with empty password first
+            String selectedNetwork = wifiNetworks[wifiSelectedIndex - 1];
+            
+            if (selectedNetwork.indexOf("[OPEN]") != -1) {
+              currentScreen = SCREEN_WIFI_CONNECT;
+              connectToWiFi(selectedNetwork, "");
+            } else {
+              currentScreen = SCREEN_WIFI_CONNECT;
+              attemptEmptyPasswordConnection(selectedNetwork);
+              
+              unsigned long startTime = millis();
+              while (millis() - startTime < 2000 && WiFi.status() != WL_CONNECTED) {
+                delay(100);
+              }
+              
+              if (WiFi.status() != WL_CONNECTED) {
+                currentScreen = SCREEN_PASSWORD_ENTRY;
+                passwordEntryMode = true;
+                passwordCursorPos = 0;
+                memset(passwordChars, 0, sizeof(passwordChars));
+                passwordChars[0] = 'a';
+              } else {
+                currentScreen = SCREEN_WIFI_STATUS;
+              }
+            }
+          }
+        } else if (button == 3) { // BACK
           currentScreen = SCREEN_MAIN_MENU;
         }
       }
