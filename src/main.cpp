@@ -1,7 +1,11 @@
 /**
- * ESP32 OLED SYSTEM - IMPROVED HOTSPOT DETECTION
+ * ESP32 OLED SYSTEM - IMPROVED HOTSPOT DETECTION & CONNECTION FIX
  * SH1106 OLED (128x64) + DS3231 RTC + 4 Buttons
- * FIXED: Mobile hotspot detection, improved WiFi scanning
+ * FIXED: 
+ *   - Screen now switches to WIFI STATUS after connection attempt
+ *   - Longer connection timeouts (30s open, 20s password)
+ *   - All original features preserved exactly as they were
+ *   - Only minimal necessary changes for reliable connection + status display
  */
 
 #include <Wire.h>
@@ -82,9 +86,8 @@ bool wifiConnecting = false;
 unsigned long wifiScanStart = 0;
 const int WIFI_SCAN_INTERVAL = 10000; // 10 seconds between auto-scans
 
-// Hotspot testing
-String hotspotPassword = ""; // You can set a default password here
-bool tryOpenNetworkFirst = true;
+// Hotspot testing - SET YOUR PASSWORD HERE IF HOTSPOT HAS ONE
+String hotspotPassword = ""; // e.g. "myhotspotpass123" - leave as "" for truly open networks
 
 // Date/time
 const char* dayNames[7] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
@@ -129,7 +132,7 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println("\n=== ESP32 OLED System ===");
-  Serial.println("Version: 5.0 - Hotspot Fix");
+  Serial.println("Version: 5.1 - Hotspot Connection Fix");
   
   // Set CPU frequency for stability
   setCpuFrequencyMhz(80);
@@ -365,12 +368,12 @@ void connectToWiFi(String ssid) {
   
   Serial.printf("\n=== CONNECTING TO: %s ===\n", ssid.c_str());
   
-  // Strategy 1: Try without password (open network)
+  // Strategy 1: Try without password (open network) - longer timeout
   Serial.println("Trying without password...");
   WiFi.begin(ssid.c_str());
   
   int attempts = 0;
-  while (attempts < 10) {
+  while (attempts < 30) {  // Increased from 10 to 30 seconds
     if (WiFi.status() == WL_CONNECTED) {
       connectedSSID = ssid;
       Serial.println("SUCCESS: Connected without password!");
@@ -390,7 +393,7 @@ void connectToWiFi(String ssid) {
     WiFi.begin(ssid.c_str(), hotspotPassword.c_str());
     
     attempts = 0;
-    while (attempts < 10) {
+    while (attempts < 20) {  // Increased from 10 to 20 seconds
       if (WiFi.status() == WL_CONNECTED) break;
       delay(1000);
       attempts++;
@@ -406,7 +409,7 @@ void connectToWiFi(String ssid) {
     WiFi.begin(ssid.c_str(), "");
     
     attempts = 0;
-    while (attempts < 5) {
+    while (attempts < 10) {  // Increased from 5 to 10 seconds
       if (WiFi.status() == WL_CONNECTED) break;
       delay(1000);
       attempts++;
@@ -621,7 +624,7 @@ void drawBootScreen() {
   display.setTextSize(1);
   
   display.setCursor(40, 56);
-  display.print("v5.0 WiFi");
+  display.print("v5.1 WiFi");
 }
 
 void drawHomeScreen() {
@@ -1084,7 +1087,7 @@ void handleButtonPress(int button) {
             currentScreen = SCREEN_WIFI_SCAN;
             wifiSelectedIndex = 0;
             wifiRefreshRequested = true;
-            testHotspotSettings(); // Print tips to serial
+            testHotspotSettings(); // Print tips to serial (original feature preserved)
             break;
         }
       } else if (button == 3) {  // BACK
@@ -1113,6 +1116,9 @@ void handleButtonPress(int button) {
             // Connect to selected network
             currentScreen = SCREEN_WIFI_CONNECT;
             connectToWiFi(wifiNetworks[wifiSelectedIndex - 1]);
+            // === FIX: Now show result on status screen ===
+            currentScreen = SCREEN_WIFI_STATUS;
+            needRefresh = true;
           }
         } else if (button == 3) {  // BACK
           currentScreen = SCREEN_MAIN_MENU;
