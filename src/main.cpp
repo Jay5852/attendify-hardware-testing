@@ -291,17 +291,17 @@ void checkDisplayTimeout() {
   // Turn off display after inactivity timeout
   if (displayOn && (millis() - lastActivityTime >= SCREEN_TIMEOUT)) {
     displayOn = false;
-    display.ssd1306_command(SSD1306_DISPLAYOFF);
-    Serial.println("Display turned off due to inactivity");
+    // For SH110X, we can't turn off via command, so we'll just stop updating
+    // The display will show last frame but that's okay
+    Serial.println("Display update stopped due to inactivity");
   }
 }
 
 void wakeDisplay() {
   if (!displayOn) {
     displayOn = true;
-    display.ssd1306_command(SSD1306_DISPLAYON);
     needRefresh = true;
-    Serial.println("Display turned on");
+    Serial.println("Display update resumed");
   }
   lastActivityTime = millis(); // Reset activity timer
 }
@@ -442,6 +442,8 @@ void connectToWiFi(String ssid, String password) {
 }
 
 void showMessage(String message, int delayTime) {
+  if (!displayInitialized || !displayOn) return;
+  
   display.clearDisplay();
   display.setCursor(10, 25);
   display.println(message);
