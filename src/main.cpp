@@ -1,5 +1,5 @@
 /**
- * ESP32 TEST CODE - FINAL COMPLETE FIX
+ * ESP32 TEST CODE - WITH HOMEPAGE UI
  * SH1106 OLED (128x64) + DS3231 RTC + 4 Buttons
  */
 
@@ -30,6 +30,7 @@ RTC_DS3231 rtc;
 // =================== SCREEN STATE ENUM ===================
 enum ScreenState {
   SCREEN_BOOT,
+  SCREEN_HOME,          // NEW: Home screen with date/time
   SCREEN_MAIN_MENU,
   SCREEN_BUTTON_TEST,
   SCREEN_SYSTEM_INFO,
@@ -60,6 +61,11 @@ int demoCounter = 0;
 // Test pattern variables
 int oledTestPattern = 0;
 
+// Day of week names
+const char* dayNames[7] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
+const char* monthNames[12] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN", 
+                              "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
+
 // =================== FUNCTION DECLARATIONS ===================
 void initializeHardware();
 void showScreen();
@@ -70,6 +76,7 @@ void handleButtonPress(int button);
 
 // Screen drawing functions
 void drawBootScreen();
+void drawHomeScreen();          // NEW: Home screen
 void drawMainMenu();
 void drawButtonTest();
 void drawSystemInfo();
@@ -91,7 +98,7 @@ void setup() {
   showScreen();
   delay(2000);
   
-  currentScreen = SCREEN_MAIN_MENU;
+  currentScreen = SCREEN_HOME;  // Changed to home screen
 }
 
 // =================== INITIALIZE HARDWARE ===================
@@ -99,8 +106,8 @@ void initializeHardware() {
   Wire.begin(OLED_SDA, OLED_SCL);
   Wire.setClock(100000);
   
-  if (!display.begin(0x3C, OLED_RESET)) {
-    if (!display.begin(0x3D, OLED_RESET)) {
+  if (!display.begin(0x3C, true)) {
+    if (!display.begin(0x3D, true)) {
       Serial.println("OLED not found!");
       while(1);
     }
@@ -117,8 +124,8 @@ void initializeHardware() {
     // Check if RTC lost power
     if (rtc.lostPower()) {
       Serial.println("RTC lost power, setting default time!");
-      // Set to a default time (Jan 19, 2026, 01:11:00)
-      rtc.adjust(DateTime(2026, 1, 19, 1, 11, 0));
+      // Set to a default time (Jan 20, 2026, 19:24:00) - from your image
+      rtc.adjust(DateTime(2026, 1, 20, 19, 24, 0));
     }
   }
   
@@ -153,12 +160,19 @@ void loop() {
 // =================== DISPLAY FUNCTIONS ===================
 void showScreen() {
   display.clearDisplay();
-  drawHeader();
+  
+  // Only draw header for non-home screens
+  if (currentScreen != SCREEN_HOME) {
+    drawHeader();
+  }
   
   // Draw main content
   switch(currentScreen) {
     case SCREEN_BOOT:
       drawBootScreen();
+      break;
+    case SCREEN_HOME:
+      drawHomeScreen();
       break;
     case SCREEN_MAIN_MENU:
       drawMainMenu();
@@ -199,52 +213,38 @@ void drawHeader() {
   
   switch(currentScreen) {
     case SCREEN_SYSTEM_INFO:
-      display.print("TEST 9-95  1 MHz/911.11");
+      display.print("SYS INFO");
       break;
     case SCREEN_SET_TIME:
-      display.print("TEST SET TIME");
+      display.print("SET TIME");
       break;
     case SCREEN_RESET_MEM:
-      display.print("TEST RESET MEM");
+      display.print("RESET MEM");
       break;
     case SCREEN_DEMO_MODE:
-      if (demoActive) {
-        display.print("TEST DETECT MODE: 22");
-      } else {
-        display.print("TEST DETECT MODE: 1/1");
-      }
+      display.print("DEMO MODE");
       break;
     case SCREEN_OLED_TEST:
-      display.print("TEST");
+      display.print("OLED TEST");
       break;
     case SCREEN_RTC_TEST:
-      display.print("SELECT 10.0K1-2006");
+      display.print("RTC TEST");
       break;
     case SCREEN_VOLT_TEST:
-      display.print("TEST");
+      display.print("VOLT TEST");
+      break;
+    case SCREEN_BUTTON_TEST:
+      display.print("BTN TEST");
       break;
     default:
       display.print("TEST");
   }
   
-  // Show time on right for most screens
+  // Show time on right for menu and test screens
   if (rtc.begin()) {
     DateTime now = rtc.now();
     
-    // Check which screens should show time
-    bool showTime = true;
-    switch(currentScreen) {
-      case SCREEN_SYSTEM_INFO:
-      case SCREEN_SET_TIME:
-      case SCREEN_DEMO_MODE:
-      case SCREEN_RTC_TEST:
-        showTime = false;
-        break;
-      default:
-        showTime = true;
-    }
-    
-    if (showTime) {
+    if (currentScreen == SCREEN_MAIN_MENU) {
       display.setCursor(85, 0);
       display.printf("%02d:%02d", now.hour(), now.minute());
     }
@@ -253,10 +253,53 @@ void drawHeader() {
   display.drawLine(0, 9, 127, 9, SH110X_WHITE);
 }
 
+void drawHomeScreen() {
+  if (!rtc.begin()) {
+    display.setCursor(20, 20);
+    display.println("RTC NOT FOUND");
+    return;
+  }
+  
+  DateTime now = rtc.now();
+  
+  // Top: Show device/model name (like your image shows "9E6045A0")
+  display.setCursor(0, 0);
+  display.println("9E6045A0");
+  display.drawLine(0, 9, 127, 9, SH110X_WHITE);
+  
+  // Center: Large time display
+  display.setCursor(25, 15);
+  display.setTextSize(3);
+  display.printf("%02d:%02d", now.hour(), now.minute());
+  display.setTextSize(1);
+  
+  // Below time: Date in format like "TUE JAN 20"
+  display.setCursor(30, 40);
+  display.print(dayNames[now.dayOfTheWeek()]);
+  display.print(" ");
+  display.print(monthNames[now.month()-1]);
+  display.print(" ");
+  display.print(now.day());
+  
+  // Bottom: Menu access button (like Android)
+  display.fillRect(0, 54, 128, 10, SH110X_WHITE);
+  display.setTextColor(SH110X_BLACK);
+  display.setCursor(40, 56);
+  display.print("MENU");
+  display.setTextColor(SH110X_WHITE);
+  
+  // Small indicator that SELECT enters menu
+  display.setCursor(0, 56);
+  display.print("SEL");
+}
+
 void drawFooter() {
   display.setCursor(0, 56);
   
   switch(currentScreen) {
+    case SCREEN_HOME:
+      // Footer already drawn in home screen
+      break;
     case SCREEN_SYSTEM_INFO:
       display.print("GND VCC SCL SON");
       break;
@@ -294,11 +337,11 @@ void drawFooter() {
       break;
     case SCREEN_MAIN_MENU:
       // Smaller up/down select hint
-      display.print("U/D SEL");
+      display.print("U/D SEL BACK");
       break;
     default:
-      // Empty footer for other screens
-      display.print("");
+      // For other screens, show BACK hint
+      display.print("PRESS BACK");
   }
 }
 
@@ -521,13 +564,25 @@ void drawRtcTest() {
   
   if (rtc.begin()) {
     DateTime now = rtc.now();
-    display.setCursor(40, 40);
+    
+    // Show time in large font
+    display.setCursor(35, 30);
     display.setTextSize(2);
     display.printf("%02d:%02d", now.hour(), now.minute());
     display.setTextSize(1);
+    
+    // Show date below time
+    display.setCursor(30, 50);
+    display.printf("%02d/%02d/%04d", now.day(), now.month(), now.year());
+    
+    // Show day of week on the right
+    display.setCursor(90, 50);
+    display.print(dayNames[now.dayOfTheWeek()]);
   } else {
-    display.setCursor(35, 40);
+    display.setCursor(35, 35);
     display.println("NO RTC");
+    display.setCursor(20, 45);
+    display.println("Check I2C wiring");
   }
 }
 
@@ -581,6 +636,13 @@ void handleButtonPress(int button) {
   needRefresh = true;
   
   switch(currentScreen) {
+    case SCREEN_HOME:
+      if (button == 2) {  // SELECT button enters menu
+        currentScreen = SCREEN_MAIN_MENU;
+        menuIndex = 0;
+      }
+      break;
+      
     case SCREEN_MAIN_MENU:
       if (button == 0) {
         menuIndex = (menuIndex > 0) ? menuIndex - 1 : 7;
@@ -597,6 +659,8 @@ void handleButtonPress(int button) {
           case 6: currentScreen = SCREEN_RTC_TEST; break;
           case 7: currentScreen = SCREEN_VOLT_TEST; break;
         }
+      } else if (button == 3) {
+        currentScreen = SCREEN_HOME;  // BACK goes to home
       }
       break;
       
@@ -629,6 +693,7 @@ void handleButtonPress(int button) {
           display.println("TIME SYNCED");
           display.display();
           delay(1000);
+          needRefresh = true;
         }
       } else if (button == 3) {
         currentScreen = SCREEN_MAIN_MENU;
@@ -646,6 +711,7 @@ void handleButtonPress(int button) {
         display.println("RESET DONE");
         display.display();
         delay(1000);
+        needRefresh = true;
       } else if (button == 3) {
         currentScreen = SCREEN_MAIN_MENU;
       }
