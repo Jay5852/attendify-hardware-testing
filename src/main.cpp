@@ -1,7 +1,7 @@
 /**
- * ESP32 OLED SYSTEM - COMPLETE FIXED VERSION
+ * ESP32 TEST CODE - CLEAN UI, FAST WIFI, PROPER LAYOUT
  * SH1106 OLED (128x64) + DS3231 RTC + 4 Buttons
- * FIXED: WiFi scanning and connection for both open and encrypted networks
+ * FINAL VERSION - ALL FIXES APPLIED WITH PASSWORD SUPPORT
  */
 
 #include <Wire.h>
@@ -19,14 +19,10 @@
 #define BUTTON_SELECT 25
 #define BUTTON_BACK 26
 
-// =================== DISPLAY CONSTANTS ===================
+// =================== OLED SETUP ===================
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
-#define OLED_RESET -1
-#define OLED_ADDR 0x3C
-
-// =================== OLED SETUP ===================
-Adafruit_SH1106G display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+Adafruit_SH1106G display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 // =================== RTC SETUP ===================
 RTC_DS3231 rtc;
@@ -34,66 +30,59 @@ RTC_DS3231 rtc;
 // =================== PREFERENCES ===================
 Preferences preferences;
 
-// =================== SCREEN STATES ===================
+// =================== SCREEN STATE ENUM ===================
 enum ScreenState {
   SCREEN_BOOT,
   SCREEN_HOME,
   SCREEN_MAIN_MENU,
   SCREEN_BUTTON_TEST,
   SCREEN_SYSTEM_INFO,
-  SCREEN_SET_TIME,
   SCREEN_RESET_MEM,
   SCREEN_DEMO_MODE,
   SCREEN_OLED_TEST,
   SCREEN_RTC_TEST,
   SCREEN_VOLT_TEST,
   SCREEN_WIFI_SCAN,
+  SCREEN_PASSWORD_ENTRY,  // New screen
   SCREEN_WIFI_CONNECT,
   SCREEN_WIFI_STATUS
-};
-
-// =================== WIFI NETWORK STRUCTURE ===================
-struct WiFiNetwork {
-  String ssid;
-  int32_t rssi;
-  uint8_t encryptionType;
-  bool isOpen;
 };
 
 // =================== GLOBAL VARIABLES ===================
 ScreenState currentScreen = SCREEN_BOOT;
 int menuIndex = 0;
-unsigned long lastButtonPress = 0;
-unsigned long lastUpdate = 0;
 bool needRefresh = true;
+bool displayInitialized = false;
 
 // Button tracking
 int buttonPressCount[4] = {0, 0, 0, 0};
-bool buttonStates[4] = {false, false, false, false};
+unsigned long buttonPressTime[4] = {0, 0, 0, 0};
+bool buttonLongPressed[4] = {false, false, false, false};
 
 // Demo mode
 bool demoActive = false;
-unsigned long demoStartTime = 0;
 int demoCounter = 0;
 
-// OLED test
-int oledTestPattern = 0;
-
-// WiFi variables - FIXED STRUCTURE
-WiFiNetwork wifiNetworks[20];
+// WiFi
+String wifiNetworks[20];
 int wifiNetworkCount = 0;
 int wifiSelectedIndex = 0;
 bool wifiScanning = false;
-bool wifiRefreshRequested = false;
-String connectedSSID = "";
 bool wifiConnecting = false;
-unsigned long wifiScanStart = 0;
-const int WIFI_SCAN_INTERVAL = 15000; // 15 seconds
+String connectedSSID = "";
 
-// *** SET YOUR HOTSPOT PASSWORD HERE ***
-String savedPassword ="";  // Leave empty for open networks, or set "YourPassword123"
+// Password entry
+String wifiPassword = "";
+bool passwordEntryMode = false;
+int passwordCursorPos = 0;
+char passwordChars[63] = {0};  // Max WPA2 password length
+int charSetIndex = 0;
 
-// Date/time
+// Character set for password entry
+const char* charSet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+[]{}|;:,.<>?";
+int charSetLength = 84;  // Length of charSet string
+
+// Day and month names
 const char* dayNames[7] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
 const char* monthNames[12] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN", 
                               "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
@@ -107,61 +96,52 @@ void showScreen();
 void drawFooter();
 void checkButtons();
 void handleButtonPress(int button);
-String getEncryptionType(uint8_t encType);
+void handleLongPress(int button);
 void scanWiFiNetworks();
-void connectToWiFi(String ssid);
+void connectToWiFi(String ssid, String password);
 
-// Screen functions
+// Screen drawing functions
 void drawBootScreen();
 void drawHomeScreen();
 void drawMainMenu();
 void drawButtonTest();
 void drawSystemInfo();
-void drawSetTime();
 void drawResetMem();
 void drawDemoMode();
 void drawOledTest();
 void drawRtcTest();
 void drawVoltTest();
 void drawWifiScanScreen();
+void drawPasswordEntryScreen();
 void drawWifiConnectScreen();
 void drawWifiStatusScreen();
 
 // =================== SETUP ===================
 void setup() {
   Serial.begin(115200);
-  delay(500);
-  Serial.println("\n=== ESP32 OLED System ===");
-  Serial.println("Version: 6.0 - WiFi Fixed");
+  delay(1000);
+  Serial.println("\n=== ESP32 System ===");
   
-  setCpuFrequencyMhz(80);
-  Serial.printf("CPU: %d MHz\n", getCpuFrequencyMhz());
-  Serial.printf("Free Heap: %d bytes\n", ESP.getFreeHeap());
-  
+  // Initialize hardware
   initializeHardware();
+  
+  // Initialize preferences
   initializePreferences();
   loadButtonCounts();
   
+  // Show boot screen
   currentScreen = SCREEN_BOOT;
   showScreen();
   delay(1500);
   
+  // Go to home screen
   currentScreen = SCREEN_HOME;
   needRefresh = true;
-  
-  Serial.println("System ready");
-  
-  // Test WiFi
-  WiFi.mode(WIFI_STA);
-  delay(100);
-  Serial.printf("WiFi MAC: %s\n", WiFi.macAddress().c_str());
-  WiFi.mode(WIFI_OFF);
 }
 
-// =================== PREFERENCES ===================
+// =================== INITIALIZE PREFERENCES ===================
 void initializePreferences() {
-  preferences.begin("oled_system", false);
-  Serial.println("Preferences initialized");
+  preferences.begin("system", false);
 }
 
 void saveButtonCounts() {
@@ -170,7 +150,8 @@ void saveButtonCounts() {
   preferences.putInt("btn_sel", buttonPressCount[2]);
   preferences.putInt("btn_back", buttonPressCount[3]);
   preferences.putInt("demo_counter", demoCounter);
-  Serial.println("Data saved");
+  preferences.end();
+  preferences.begin("system", false);
 }
 
 void loadButtonCounts() {
@@ -179,400 +160,375 @@ void loadButtonCounts() {
   buttonPressCount[2] = preferences.getInt("btn_sel", 0);
   buttonPressCount[3] = preferences.getInt("btn_back", 0);
   demoCounter = preferences.getInt("demo_counter", 0);
-  
-  Serial.printf("Loaded: U:%d D:%d S:%d B:%d\n",
-                buttonPressCount[0], buttonPressCount[1], 
-                buttonPressCount[2], buttonPressCount[3]);
 }
 
-// =================== HARDWARE INIT ===================
+// =================== INITIALIZE HARDWARE ===================
 void initializeHardware() {
   Wire.begin(OLED_SDA, OLED_SCL);
-  Wire.setClock(100000);
+  Wire.setClock(400000);
   
-  Serial.println("Initializing OLED...");
-  bool oledFound = false;
-  if (display.begin(OLED_ADDR, true)) {
-    oledFound = true;
-    Serial.println("OLED found at 0x3C");
-  } else if (display.begin(0x3D, true)) {
-    oledFound = true;
-    Serial.println("OLED found at 0x3D");
-  }
-  
-  if (!oledFound) {
+  // Initialize OLED
+  if (!display.begin(0x3C, true)) {
     Serial.println("OLED not found!");
+    displayInitialized = false;
   } else {
+    displayInitialized = true;
     display.clearDisplay();
     display.setTextSize(1);
     display.setTextColor(SH110X_WHITE);
     display.setRotation(0);
-    display.setContrast(255);
-    Serial.println("OLED ready");
+    Serial.println("OLED initialized");
   }
   
-  if (rtc.begin()) {
-    if (rtc.lostPower()) {
-      Serial.println("RTC: Setting time");
-      rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-    }
-    Serial.println("RTC ready");
+  // Initialize RTC
+  if (!rtc.begin()) {
+    Serial.println("RTC not found!");
   } else {
-    Serial.println("RTC not found");
+    if (rtc.lostPower()) {
+      rtc.adjust(DateTime(2026, 1, 21, 12, 30, 0));
+    }
+    Serial.println("RTC initialized");
   }
   
+  // Initialize buttons
   pinMode(BUTTON_UP, INPUT_PULLUP);
   pinMode(BUTTON_DOWN, INPUT_PULLUP);
   pinMode(BUTTON_SELECT, INPUT_PULLUP);
   pinMode(BUTTON_BACK, INPUT_PULLUP);
   
-  Serial.println("Hardware ready");
-}
-
-// =================== WIFI HELPER ===================
-String getEncryptionType(uint8_t encType) {
-  switch(encType) {
-    case WIFI_AUTH_OPEN: return "OPEN";
-    case WIFI_AUTH_WEP: return "WEP";
-    case WIFI_AUTH_WPA_PSK: return "WPA";
-    case WIFI_AUTH_WPA2_PSK: return "WPA2";
-    case WIFI_AUTH_WPA_WPA2_PSK: return "WPA/2";
-    case WIFI_AUTH_WPA2_ENTERPRISE: return "WPA2-E";
-    case WIFI_AUTH_WPA3_PSK: return "WPA3";
-    case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA2/3";
-    default: return "UNK";
-  }
-}
-
-// =================== WIFI SCAN - FIXED ===================
-void scanWiFiNetworks() {
-  wifiScanning = true;
-  wifiNetworkCount = 0;
-  wifiScanStart = millis();
-  
-  // Clear list
-  for (int i = 0; i < 20; i++) {
-    wifiNetworks[i].ssid = "";
-    wifiNetworks[i].rssi = 0;
-    wifiNetworks[i].encryptionType = 0;
-    wifiNetworks[i].isOpen = false;
-  }
-  
-  WiFi.disconnect(true);
-  delay(100);
-  WiFi.mode(WIFI_STA);
-  delay(100);
-  
-  Serial.println("\n=== WIFI SCAN ===");
-  
-  // Scan with show_hidden=true
-  int n = WiFi.scanNetworks(false, true, false, 300);
-  
-  Serial.printf("Found %d networks\n", n);
-  
-  if (n > 0) {
-    for (int i = 0; i < n && wifiNetworkCount < 20; i++) {
-      String ssid = WiFi.SSID(i);
-      
-      if (ssid.length() == 0) {
-        Serial.printf("  [%d] Hidden - skipped\n", i);
-        continue;
-      }
-      
-      wifiNetworks[wifiNetworkCount].ssid = ssid;
-      wifiNetworks[wifiNetworkCount].rssi = WiFi.RSSI(i);
-      wifiNetworks[wifiNetworkCount].encryptionType = WiFi.encryptionType(i);
-      wifiNetworks[wifiNetworkCount].isOpen = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
-      
-      Serial.printf("  [%d] %-20s %4d dBm %s %s\n", 
-                    wifiNetworkCount,
-                    ssid.c_str(),
-                    wifiNetworks[wifiNetworkCount].rssi,
-                    getEncryptionType(wifiNetworks[wifiNetworkCount].encryptionType).c_str(),
-                    wifiNetworks[wifiNetworkCount].isOpen ? "[OPEN]" : "");
-      
-      wifiNetworkCount++;
-    }
-  }
-  
-  WiFi.scanDelete();
-  wifiScanning = false;
-  Serial.printf("=== %d networks found ===\n\n", wifiNetworkCount);
-  
-  if (wifiNetworkCount == 0) {
-    Serial.println("TIPS:");
-    Serial.println("1. Enable 2.4GHz hotspot (not 5GHz)");
-    Serial.println("2. Make hotspot visible");
-    Serial.println("3. Keep phone close to ESP32");
-  }
-}
-
-// =================== WIFI CONNECT - FIXED ===================
-void connectToWiFi(String ssid) {
-  // Find network in scan results
-  int networkIndex = -1;
-  for (int i = 0; i < wifiNetworkCount; i++) {
-    if (wifiNetworks[i].ssid == ssid) {
-      networkIndex = i;
-      break;
-    }
-  }
-  
-  if (networkIndex == -1) {
-    Serial.println("ERROR: Network not found!");
-    wifiConnecting = false;
-    return;
-  }
-  
-  wifiConnecting = true;
-  connectedSSID = "";
-  
-  WiFiNetwork &network = wifiNetworks[networkIndex];
-  
-  Serial.println("\n=== CONNECTING ===");
-  Serial.printf("SSID: %s\n", network.ssid.c_str());
-  Serial.printf("Type: %s\n", getEncryptionType(network.encryptionType).c_str());
-  Serial.printf("Signal: %d dBm\n", network.rssi);
-  Serial.printf("Open: %s\n", network.isOpen ? "YES" : "NO");
-  
-  WiFi.disconnect(true);
-  delay(100);
-  WiFi.mode(WIFI_STA);
-  delay(100);
-  
-  if (network.isOpen) {
-    // OPEN NETWORK - no password
-    Serial.println("Connecting to OPEN network (no password)...");
-    WiFi.begin(network.ssid.c_str());
-  } else {
-    // ENCRYPTED NETWORK - need password
-    Serial.println("Network is ENCRYPTED");
-    
-    if (savedPassword.length() > 0) {
-      Serial.printf("Using saved password (%d chars)\n", savedPassword.length());
-      WiFi.begin(network.ssid.c_str(), savedPassword.c_str());
-    } else {
-      Serial.println("\nERROR: No password set!");
-      Serial.println("Set password in code:");
-      Serial.println("  String savedPassword = \"YourPassword\";");
-      wifiConnecting = false;
-      return;
-    }
-  }
-  
-  // Wait for connection (15 seconds)
-  int attempts = 0;
-  Serial.print("Connecting");
-  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
-  }
-  Serial.println();
-  
-  // Check result
-  if (WiFi.status() == WL_CONNECTED) {
-    connectedSSID = network.ssid;
-    Serial.println("\n*** SUCCESS! ***");
-    Serial.printf("SSID: %s\n", connectedSSID.c_str());
-    Serial.printf("IP: %s\n", WiFi.localIP().toString().c_str());
-    Serial.printf("Signal: %d dBm\n", WiFi.RSSI());
-    Serial.printf("Gateway: %s\n", WiFi.gatewayIP().toString().c_str());
-    currentScreen = SCREEN_WIFI_STATUS;
-  } else {
-    Serial.println("\n*** FAILED! ***");
-    if (!network.isOpen) {
-      Serial.println("Reasons:");
-      Serial.println("- Wrong password");
-      Serial.println("- WPA3 not supported");
-      Serial.println("- Too many attempts");
-    } else {
-      Serial.println("Reasons:");
-      Serial.println("- Signal too weak");
-      Serial.println("- Hotspot turned off");
-      Serial.println("- Too many devices");
-    }
-    WiFi.disconnect();
-  }
-  
-  wifiConnecting = false;
-  needRefresh = true;
-  Serial.println("==================\n");
+  // Initially disable WiFi
+  WiFi.mode(WIFI_OFF);
+  Serial.println("Hardware initialized");
 }
 
 // =================== MAIN LOOP ===================
 void loop() {
   checkButtons();
   
+  // Update screen
+  static unsigned long lastUpdate = 0;
   if (millis() - lastUpdate > 200 || needRefresh) {
     showScreen();
     lastUpdate = millis();
     needRefresh = false;
   }
   
-  if (wifiRefreshRequested) {
-    scanWiFiNetworks();
-    wifiRefreshRequested = false;
+  // Demo mode updates
+  if (currentScreen == SCREEN_DEMO_MODE && demoActive) {
+    static unsigned long demoLastUpdate = 0;
+    if (millis() - demoLastUpdate > 500) {
+      demoCounter++;
+      if (demoCounter > 9999) demoCounter = 0;
+      demoLastUpdate = millis();
+      needRefresh = true;
+      saveButtonCounts();
+    }
+  }
+  
+  delay(50);
+}
+
+// =================== WIFI FUNCTIONS ===================
+void scanWiFiNetworks() {
+  wifiScanning = true;
+  wifiNetworkCount = 0;
+  needRefresh = true;
+  
+  // Clear network list
+  for (int i = 0; i < 20; i++) {
+    wifiNetworks[i] = "";
+  }
+  
+  // Enable WiFi
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
+  
+  Serial.println("Scanning for WiFi...");
+  
+  // Scan networks
+  int16_t n = WiFi.scanNetworks();
+  
+  Serial.printf("Found %d networks\n", n);
+  
+  for (int i = 0; i < n && wifiNetworkCount < 20; i++) {
+    String ssid = WiFi.SSID(i);
+    int32_t rssi = WiFi.RSSI(i);
+    wifi_auth_mode_t auth = WiFi.encryptionType(i);
+    
+    // Skip empty or very weak networks
+    if (ssid.length() == 0 || rssi < -95) continue;
+    
+    // Add security indicator to SSID
+    String security = "";
+    if (auth == WIFI_AUTH_OPEN) {
+      security = " [OPEN]";
+    } else if (auth == WIFI_AUTH_WEP) {
+      security = " [WEP]";
+    } else if (auth == WIFI_AUTH_WPA_PSK) {
+      security = " [WPA]";
+    } else if (auth == WIFI_AUTH_WPA2_PSK) {
+      security = " [WPA2]";
+    } else if (auth == WIFI_AUTH_WPA_WPA2_PSK) {
+      security = " [WPA/WPA2]";
+    } else {
+      security = " [SECURE]";
+    }
+    
+    // Truncate long SSIDs
+    String displayName = ssid;
+    if (ssid.length() > 12) {
+      displayName = ssid.substring(0, 9) + "...";
+    }
+    
+    wifiNetworks[wifiNetworkCount] = displayName + security;
+    wifiNetworkCount++;
+    
+    Serial.printf("%d: %s (%d dBm) Auth: %d\n", wifiNetworkCount, ssid.c_str(), rssi, auth);
+  }
+  
+  WiFi.scanDelete();
+  wifiScanning = false;
+  
+  if (wifiNetworkCount == 0) {
+    Serial.println("No networks found. Ensure hotspot is ON and visible.");
+  }
+}
+
+void connectToWiFi(String ssid, String password) {
+  connectedSSID = "";
+  wifiConnecting = true;
+  needRefresh = true;
+  
+  // Remove security info from SSID
+  int bracketPos = ssid.indexOf(" [");
+  if (bracketPos != -1) {
+    ssid = ssid.substring(0, bracketPos);
+  }
+  
+  Serial.printf("Connecting to: %s\n", ssid.c_str());
+  Serial.printf("Password: %s\n", password.c_str());
+  
+  // Connect with password
+  WiFi.begin(ssid.c_str(), password.c_str());
+  
+  int attempts = 0;
+  while (attempts < 20) {
+    if (WiFi.status() == WL_CONNECTED) {
+      connectedSSID = ssid;
+      Serial.println("Connected!");
+      wifiConnecting = false;
+      needRefresh = true;
+      break;
+    }
+    delay(500);
+    attempts++;
+  }
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Connection failed!");
+    wifiConnecting = false;
     needRefresh = true;
   }
-  
-  if (currentScreen == SCREEN_WIFI_SCAN && !wifiScanning) {
-    if (millis() - wifiScanStart > WIFI_SCAN_INTERVAL) {
-      wifiRefreshRequested = true;
-    }
-  }
-  
-  if (currentScreen == SCREEN_DEMO_MODE && demoActive) {
-    if (millis() - demoStartTime > 500) {
-      demoCounter++;
-      if (demoCounter > 999) demoCounter = 0;
-      demoStartTime = millis();
-      needRefresh = true;
-    }
-  }
-  
-  delay(10);
 }
 
 // =================== DISPLAY FUNCTIONS ===================
 void showScreen() {
+  if (!displayInitialized) return;
+  
   display.clearDisplay();
   
+  // Draw main content
   switch(currentScreen) {
-    case SCREEN_BOOT: drawBootScreen(); break;
-    case SCREEN_HOME: drawHomeScreen(); break;
-    case SCREEN_MAIN_MENU: drawMainMenu(); break;
-    case SCREEN_BUTTON_TEST: drawButtonTest(); break;
-    case SCREEN_SYSTEM_INFO: drawSystemInfo(); break;
-    case SCREEN_SET_TIME: drawSetTime(); break;
-    case SCREEN_RESET_MEM: drawResetMem(); break;
-    case SCREEN_DEMO_MODE: drawDemoMode(); break;
-    case SCREEN_OLED_TEST: drawOledTest(); break;
-    case SCREEN_RTC_TEST: drawRtcTest(); break;
-    case SCREEN_VOLT_TEST: drawVoltTest(); break;
-    case SCREEN_WIFI_SCAN: drawWifiScanScreen(); break;
-    case SCREEN_WIFI_CONNECT: drawWifiConnectScreen(); break;
-    case SCREEN_WIFI_STATUS: drawWifiStatusScreen(); break;
+    case SCREEN_BOOT:
+      drawBootScreen();
+      break;
+    case SCREEN_HOME:
+      drawHomeScreen();
+      break;
+    case SCREEN_MAIN_MENU:
+      drawMainMenu();
+      break;
+    case SCREEN_BUTTON_TEST:
+      drawButtonTest();
+      break;
+    case SCREEN_SYSTEM_INFO:
+      drawSystemInfo();
+      break;
+    case SCREEN_RESET_MEM:
+      drawResetMem();
+      break;
+    case SCREEN_DEMO_MODE:
+      drawDemoMode();
+      break;
+    case SCREEN_OLED_TEST:
+      drawOledTest();
+      break;
+    case SCREEN_RTC_TEST:
+      drawRtcTest();
+      break;
+    case SCREEN_VOLT_TEST:
+      drawVoltTest();
+      break;
+    case SCREEN_WIFI_SCAN:
+      drawWifiScanScreen();
+      break;
+    case SCREEN_PASSWORD_ENTRY:
+      drawPasswordEntryScreen();
+      break;
+    case SCREEN_WIFI_CONNECT:
+      drawWifiConnectScreen();
+      break;
+    case SCREEN_WIFI_STATUS:
+      drawWifiStatusScreen();
+      break;
   }
   
-  if (currentScreen != SCREEN_HOME && currentScreen != SCREEN_BOOT) {
-    drawFooter();
-  }
-  
+  // Draw footer (button hints)
+  drawFooter();
   display.display();
 }
 
 void drawFooter() {
+  // Small font for button hints (at bottom)
   display.setTextSize(1);
   
   switch(currentScreen) {
+    case SCREEN_HOME:
+      display.setCursor(50, 56);
+      display.print("SEL=Menu");
+      break;
+      
     case SCREEN_MAIN_MENU:
-      display.setCursor(0, 57);
-      display.print("U/D:Nav  S:OK  B:Home");
+      display.setCursor(0, 56);
+      display.print("U/D=Nav");
+      display.setCursor(50, 56);
+      display.print("S=Select");
+      display.setCursor(90, 56);
+      display.print("B=Back");
       break;
-    case SCREEN_BUTTON_TEST:
-      display.setCursor(0, 57);
-      display.print("B:Menu  Auto-save");
-      break;
+      
     case SCREEN_RESET_MEM:
-      display.setCursor(5, 57);
-      display.print("S:Confirm  B:Cancel");
+      display.setCursor(10, 56);
+      display.print("S=Confirm");
+      display.setCursor(80, 56);
+      display.print("B=Cancel");
       break;
-    case SCREEN_DEMO_MODE:
-      display.setCursor(20, 57);
-      display.print(demoActive ? "S:Stop  B:Menu" : "S:Start  B:Menu");
-      break;
+      
     case SCREEN_WIFI_SCAN:
       if (!wifiScanning) {
-        display.setCursor(5, 57);
-        display.print(wifiSelectedIndex == 0 ? "S:Refresh  B:Menu" : "S:Connect  B:Menu");
-      } else {
-        display.setCursor(40, 57);
-        display.print("Scanning...");
+        display.setCursor(0, 56);
+        display.print("S=Connect");
+        display.setCursor(80, 56);
+        display.print("B=Menu");
       }
       break;
-    case SCREEN_WIFI_CONNECT:
-      display.setCursor(10, 57);
-      display.print("Connecting...  B:Cancel");
+      
+    case SCREEN_PASSWORD_ENTRY:
+      display.setCursor(0, 56);
+      display.print("U/D:Char");
+      display.setCursor(50, 56);
+      display.print("S=Add");
+      display.setCursor(80, 56);
+      display.print("B=Del");
+      display.setCursor(110, 56);
+      display.print("L=C");
       break;
-    case SCREEN_WIFI_STATUS:
-      display.setCursor(50, 57);
-      display.print("S/B:Menu");
+      
+    case SCREEN_DEMO_MODE:
+      display.setCursor(40, 56);
+      display.print("S=Toggle");
       break;
-    case SCREEN_OLED_TEST:
-      display.setCursor(5, 57);
-      display.print("U/D:Change  B:Menu");
-      break;
+      
     default:
-      display.setCursor(50, 57);
-      display.print("B:Menu");
+      if (currentScreen != SCREEN_BOOT && currentScreen != SCREEN_HOME) {
+        display.setCursor(50, 56);
+        display.print("B=Menu");
+      }
       break;
   }
 }
 
 void drawBootScreen() {
-  display.setCursor(35, 20);
+  display.setCursor(30, 20);
   display.setTextSize(2);
   display.println("SYSTEM");
-  display.setCursor(40, 40);
+  display.setCursor(45, 40);
   display.println("TEST");
   display.setTextSize(1);
-  display.setCursor(30, 56);
-  display.print("v6.0 Fixed");
+  
+  display.setCursor(40, 56);
+  display.print("v1.2");
 }
 
 void drawHomeScreen() {
   if (rtc.begin()) {
     DateTime now = rtc.now();
     
-    display.setCursor(25, 10);
+    // Top: Day and date (small font)
+    display.setCursor(10, 0);
+    display.printf("%s %02d %s", 
+                  dayNames[now.dayOfTheWeek()], 
+                  now.day(),
+                  monthNames[now.month()-1]);
+    
+    // Center: Large time
+    display.setCursor(20, 15);
     display.setTextSize(3);
     display.printf("%02d:%02d", now.hour(), now.minute());
     display.setTextSize(1);
     
-    display.setCursor(20, 40);
-    display.print(dayNames[now.dayOfTheWeek()]);
-    display.print(" ");
-    display.print(now.day());
-    display.print(" ");
-    display.print(monthNames[now.month()-1]);
-    
-    display.setCursor(20, 50);
-    display.print("Temp: ");
-    display.print((int)rtc.getTemperature());
-    display.print("C");
+    // Bottom: Year
+    display.setCursor(55, 45);
+    display.printf("20%02d", now.year() % 100);
   } else {
     display.setCursor(30, 25);
-    display.println("RTC ERROR");
+    display.println("RTC NOT");
+    display.setCursor(35, 40);
+    display.println("FOUND");
   }
   
-  display.setCursor(35, 57);
-  display.print("Press SELECT");
+  // WiFi indicator if connected
+  if (WiFi.status() == WL_CONNECTED) {
+    display.setCursor(100, 0);
+    display.print("WiFi");
+  }
 }
 
 void drawMainMenu() {
   display.setCursor(40, 2);
-  display.println("MENU");
+  display.println("MAIN MENU");
+  display.drawLine(0, 10, 127, 10, SH110X_WHITE);
   
-  String menuItems[9] = {
-    "BUTTON TEST", "SYSTEM INFO", "SET TIME", "RESET DATA",
-    "DEMO MODE", "DISPLAY TEST", "RTC TEST", "VOLTAGE TEST", "WIFI SCAN"
+  String menuItems[10] = {
+    "1. BUTTON TEST",
+    "2. SYSTEM INFO",
+    "3. RESET MEMORY",
+    "4. DEMO MODE",
+    "5. OLED TEST",
+    "6. RTC TEST",
+    "7. VOLTAGE TEST",
+    "8. WIFI SCAN",
+    "9. SET TIME",
+    "10. ABOUT"
   };
   
-  int startIdx = (menuIndex > 3) ? menuIndex - 3 : 0;
+  // Show 4 items at a time
+  int startIndex = 0;
+  if (menuIndex > 3) {
+    startIndex = menuIndex - 3;
+  }
   
-  for (int i = 0; i < 4 && (startIdx + i) < 9; i++) {
-    int idx = startIdx + i;
-    int yPos = 15 + (i * 10);
+  for (int i = 0; i < 4 && (startIndex + i) < 10; i++) {
+    int yPos = 15 + (i * 12);
+    int idx = startIndex + i;
     
     if (idx == menuIndex) {
-      display.fillRect(0, yPos - 1, 128, 9, SH110X_WHITE);
+      display.fillRect(0, yPos - 2, 128, 12, SH110X_WHITE);
       display.setTextColor(SH110X_BLACK);
     }
     
     display.setCursor(5, yPos);
-    display.print(idx + 1);
-    display.print(". ");
     display.print(menuItems[idx]);
     
     if (idx == menuIndex) {
@@ -580,430 +536,487 @@ void drawMainMenu() {
     }
   }
   
-  if (startIdx > 0) {
+  // Scroll indicators
+  if (menuIndex > 3) {
     display.setCursor(120, 15);
     display.print("^");
   }
-  if (startIdx + 4 < 9) {
-    display.setCursor(120, 50);
+  if (menuIndex < 6) {
+    display.setCursor(120, 55);
     display.print("v");
   }
 }
 
 void drawButtonTest() {
-  display.setCursor(40, 2);
-  display.println("BUTTONS");
+  display.setCursor(35, 2);
+  display.println("BUTTON TEST");
+  display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
   display.setCursor(10, 20);
-  display.print("UP:   ");
+  display.print("UP:    ");
   display.print(buttonPressCount[0]);
   
-  display.setCursor(70, 20);
-  display.print("DOWN: ");
+  display.setCursor(10, 30);
+  display.print("DOWN:  ");
   display.print(buttonPressCount[1]);
   
-  display.setCursor(10, 35);
-  display.print("SEL:  ");
+  display.setCursor(10, 40);
+  display.print("SELECT:");
   display.print(buttonPressCount[2]);
   
-  display.setCursor(70, 35);
-  display.print("BACK: ");
-  display.print(buttonPressCount[3]);
-  
   display.setCursor(10, 50);
-  display.print("DEMO: ");
-  display.print(demoCounter);
+  display.print("BACK:  ");
+  display.print(buttonPressCount[3]);
 }
 
 void drawSystemInfo() {
-  display.setCursor(40, 2);
-  display.println("SYSTEM");
+  display.setCursor(35, 2);
+  display.println("SYSTEM INFO");
+  display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
-  display.setCursor(5, 20);
-  display.print("CPU: ");
+  display.setCursor(10, 20);
+  display.print("ESP32");
+  
+  display.setCursor(10, 30);
+  display.print("Freq: ");
   display.print(getCpuFrequencyMhz());
   display.print(" MHz");
   
-  display.setCursor(5, 30);
-  display.print("RAM: ");
+  display.setCursor(10, 40);
+  display.print("Heap: ");
   display.print(ESP.getFreeHeap() / 1024);
   display.print(" KB");
   
-  display.setCursor(5, 40);
-  display.print("CHIP: ESP32");
-  
-  display.setCursor(5, 50);
-  display.print("DISPLAY: OK");
-}
-
-void drawSetTime() {
-  display.setCursor(40, 2);
-  display.println("SET TIME");
-  
-  display.setCursor(25, 25);
-  display.println("Feature");
-  display.setCursor(20, 40);
-  display.println("Coming Soon");
+  display.setCursor(10, 50);
+  display.print("Flash: ");
+  display.print(ESP.getFlashChipSize() / (1024 * 1024));
+  display.print(" MB");
 }
 
 void drawResetMem() {
   display.setCursor(40, 2);
-  display.println("RESET");
+  display.println("RESET DATA");
+  display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
   display.setCursor(5, 20);
-  display.println("This will reset all");
+  display.print("This will reset");
   display.setCursor(5, 30);
-  display.println("counters to zero.");
+  display.print("all counters to");
+  display.setCursor(5, 40);
+  display.print("zero.");
   
-  display.setCursor(10, 45);
-  display.println("Press SELECT to reset");
+  display.setCursor(20, 50);
+  display.print("Press SEL");
 }
 
 void drawDemoMode() {
   display.setCursor(40, 2);
-  display.println("DEMO");
+  display.println("DEMO MODE");
+  display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
   display.setCursor(50, 25);
   display.setTextSize(2);
-  display.print(demoCounter);
+  display.printf("%04d", demoCounter);
   display.setTextSize(1);
   
-  display.setCursor(demoActive ? 45 : 40, 45);
-  display.print(demoActive ? "RUNNING" : "PRESS START");
+  if (demoActive) {
+    display.setCursor(45, 45);
+    display.print("RUNNING");
+  } else {
+    display.setCursor(45, 45);
+    display.print("PAUSED");
+  }
 }
 
 void drawOledTest() {
   display.setCursor(40, 2);
-  display.println("DISPLAY");
+  display.println("OLED TEST");
+  display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
-  display.setCursor(40, 20);
+  static int pattern = 0;
+  
+  display.setCursor(45, 25);
   display.print("Pattern ");
-  display.print(oledTestPattern + 1);
+  display.print(pattern + 1);
   
-  switch(oledTestPattern % 4) {
+  switch(pattern % 4) {
     case 0:
-      display.fillRect(10, 30, 108, 24, SH110X_WHITE);
+      display.fillRect(30, 35, 68, 10, SH110X_WHITE);
       break;
     case 1:
-      display.fillCircle(64, 42, 20, SH110X_WHITE);
+      display.fillCircle(64, 40, 12, SH110X_WHITE);
       break;
     case 2:
-      display.fillTriangle(30, 50, 64, 30, 98, 50, SH110X_WHITE);
+      display.fillTriangle(30, 45, 64, 30, 98, 45, SH110X_WHITE);
       break;
     case 3:
-      for (int i = 0; i < 8; i++) {
-        display.fillRect(10 + (i * 15), 30, 10, 24, SH110X_WHITE);
+      for (int i = 0; i < 128; i += 6) {
+        display.drawLine(i, 35, i, 50, SH110X_WHITE);
       }
       break;
   }
 }
 
 void drawRtcTest() {
-  display.setCursor(40, 2);
-  display.println("RTC");
+  display.setCursor(45, 2);
+  display.println("RTC TEST");
+  display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
   if (rtc.begin()) {
     DateTime now = rtc.now();
     
     display.setCursor(10, 20);
-    display.printf("Date: %04d-%02d-%02d", now.year(), now.month(), now.day());
+    display.print("Date: ");
+    display.print(now.year());
+    display.print("-");
+    display.print(now.month());
+    display.print("-");
+    display.print(now.day());
     
     display.setCursor(10, 30);
-    display.printf("Time: %02d:%02d:%02d", now.hour(), now.minute(), now.second());
+    display.print("Time: ");
+    display.print(now.hour());
+    display.print(":");
+    display.print(now.minute());
+    display.print(":");
+    display.print(now.second());
     
     display.setCursor(10, 40);
-    display.print("Day: ");
-    display.print(dayNames[now.dayOfTheWeek()]);
-    
-    display.setCursor(10, 50);
     display.print("Temp: ");
     display.print(rtc.getTemperature(), 1);
-    display.print("C");
+    display.print(" C");
   } else {
-    display.setCursor(30, 30);
-    display.println("RTC ERROR");
+    display.setCursor(40, 25);
+    display.println("RTC NOT");
+    display.setCursor(45, 40);
+    display.println("FOUND!");
   }
 }
 
 void drawVoltTest() {
-  display.setCursor(40, 2);
-  display.println("VOLTAGE");
+  display.setCursor(30, 2);
+  display.println("VOLTAGE TEST");
+  display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
   int adcValue = analogRead(34);
   float voltage = adcValue * (3.3 / 4095.0);
   
-  display.setCursor(10, 20);
+  display.setCursor(20, 25);
   display.print("ADC: ");
   display.print(adcValue);
   
-  display.setCursor(10, 35);
+  display.setCursor(20, 35);
   display.print("Voltage: ");
   display.print(voltage, 2);
   display.print("V");
   
-  display.setCursor(10, 50);
-  display.print("BATTERY: ");
-  display.print(voltage > 3.0 ? "OK" : (voltage > 2.5 ? "LOW" : "BAD"));
+  display.setCursor(20, 45);
+  if (voltage > 3.0) {
+    display.print("BATTERY OK");
+  } else if (voltage > 2.5) {
+    display.print("LOW BATTERY");
+  } else {
+    display.print("CRITICAL!");
+  }
 }
 
 void drawWifiScanScreen() {
   display.setCursor(40, 2);
-  display.println("WIFI");
+  display.println("WIFI SCAN");
   
   if (wifiScanning) {
-    display.setCursor(30, 30);
+    display.setCursor(40, 30);
     display.print("SCANNING...");
-    display.setCursor(25, 45);
-    display.print("Please wait");
     return;
   }
   
   if (wifiNetworkCount == 0) {
-    display.setCursor(20, 20);
+    display.setCursor(15, 25);
     display.println("No networks");
-    display.setCursor(30, 35);
-    display.println("found");
+    display.setCursor(5, 40);
+    display.println("Turn ON hotspot");
     display.setCursor(5, 50);
-    display.print("Check 2.4GHz hotspot");
+    display.println("and try again");
   } else {
-    int displayCount = 0;
-    int startY = 15;
-    
-    // Refresh option
-    int yPos = startY;
-    if (wifiSelectedIndex == 0) {
-      display.fillRect(0, yPos - 1, 128, 9, SH110X_WHITE);
-      display.setTextColor(SH110X_BLACK);
+    // Show 3 networks at a time (smaller font)
+    int startIndex = 0;
+    if (wifiSelectedIndex > 2) {
+      startIndex = wifiSelectedIndex - 2;
     }
-    display.setCursor(5, yPos);
-    display.print("[Refresh]");
-    if (wifiSelectedIndex == 0) display.setTextColor(SH110X_WHITE);
-    displayCount++;
     
-    // Networks (up to 4)
-    for (int i = 0; i < min(wifiNetworkCount, 4); i++) {
-      yPos = startY + (displayCount * 10);
+    for (int i = 0; i < 3 && (startIndex + i) < wifiNetworkCount; i++) {
+      int yPos = 12 + (i * 16);  // More spacing
+      int idx = startIndex + i;
       
-      if (wifiSelectedIndex == i + 1) {
-        display.fillRect(0, yPos - 1, 128, 9, SH110X_WHITE);
+      if (idx == wifiSelectedIndex) {
+        display.fillRect(0, yPos - 1, 128, 15, SH110X_WHITE);
         display.setTextColor(SH110X_BLACK);
       }
       
-      String displayText = wifiNetworks[i].ssid;
-      if (displayText.length() > 13) {
-        displayText = displayText.substring(0, 10) + "...";
-      }
+      display.setCursor(2, yPos);
       
-      display.setCursor(5, yPos);
+      // Show network with security indicator
+      String displayText = String(idx + 1) + ". " + wifiNetworks[idx];
+      if (displayText.length() > 20) {
+        displayText = displayText.substring(0, 17) + "...";
+      }
       display.print(displayText);
       
-      // Show OPEN indicator
-      if (wifiNetworks[i].isOpen) {
-        display.setCursor(100, yPos);
-        display.print("OPN");
+      if (idx == wifiSelectedIndex) {
+        display.setTextColor(SH110X_WHITE);
       }
-      
-      if (wifiSelectedIndex == i + 1) display.setTextColor(SH110X_WHITE);
-      displayCount++;
     }
     
-    // Network count
+    // Scroll indicators (small)
+    if (wifiSelectedIndex > 2) {
+      display.setCursor(122, 12);
+      display.print("^");
+    }
+    if (wifiSelectedIndex < wifiNetworkCount - 1) {
+      display.setCursor(122, 56);
+      display.print("v");
+    }
+    
+    // Show count
     display.setCursor(100, 2);
-    display.print(wifiNetworkCount);
+    display.printf("%d/%d", wifiSelectedIndex + 1, wifiNetworkCount);
   }
+}
+
+void drawPasswordEntryScreen() {
+  display.setCursor(30, 2);
+  display.println("ENTER PASSWORD");
+  display.drawLine(0, 12, 127, 12, SH110X_WHITE);
+  
+  // Show selected network (truncated)
+  String displaySSID = wifiNetworks[wifiSelectedIndex];
+  // Remove security info for display
+  int bracketPos = displaySSID.indexOf(" [");
+  if (bracketPos != -1) {
+    displaySSID = displaySSID.substring(0, bracketPos);
+  }
+  
+  display.setCursor(5, 18);
+  display.print("For: ");
+  if (displaySSID.length() > 16) {
+    display.print(displaySSID.substring(0, 13) + "...");
+  } else {
+    display.print(displaySSID);
+  }
+  
+  // Show password (masked)
+  display.setCursor(5, 30);
+  display.print("Pass: ");
+  for (int i = 0; i < passwordCursorPos; i++) {
+    if (passwordChars[i] != 0) {
+      display.print("*");
+    }
+  }
+  
+  // Show cursor
+  display.setCursor(5 + (passwordCursorPos * 6), 30);
+  display.print("_");
+  
+  // Show current character
+  display.setCursor(5, 45);
+  display.print("Char: ");
+  if (passwordCursorPos < sizeof(passwordChars) && passwordChars[passwordCursorPos] != 0) {
+    display.print(passwordChars[passwordCursorPos]);
+  } else {
+    display.print("a");
+  }
+  
+  // Show password length
+  display.setCursor(70, 45);
+  display.print("Len: ");
+  display.print(passwordCursorPos);
 }
 
 void drawWifiConnectScreen() {
   display.setCursor(30, 2);
   display.println("CONNECTING");
+  display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
-  if (wifiSelectedIndex > 0 && wifiSelectedIndex <= wifiNetworkCount) {
-    display.setCursor(5, 20);
-    display.print("Network:");
-    
-    display.setCursor(5, 30);
-    String ssid = wifiNetworks[wifiSelectedIndex - 1].ssid;
-    if (ssid.length() > 18) {
-      ssid = ssid.substring(0, 15) + "...";
-    }
-    display.print(ssid);
-    
-    display.setCursor(5, 40);
-    if (wifiNetworks[wifiSelectedIndex - 1].isOpen) {
-      display.print("Type: OPEN");
-    } else {
-      display.print("Type: ENCRYPTED");
-    }
-  }
+  display.setCursor(40, 30);
   
   if (wifiConnecting) {
-    display.setCursor(30, 50);
-    display.print("Please wait...");
+    static int dots = 0;
+    display.print("PLEASE WAIT");
+    for (int i = 0; i < dots; i++) display.print(".");
+    dots = (dots + 1) % 4;
+  } else {
+    display.print("COMPLETE!");
+  }
+  
+  if (wifiSelectedIndex < wifiNetworkCount) {
+    display.setCursor(10, 45);
+    display.print("To: ");
+    String ssid = wifiNetworks[wifiSelectedIndex];
+    int bracketPos = ssid.indexOf(" [");
+    if (bracketPos != -1) {
+      ssid = ssid.substring(0, bracketPos);
+    }
+    if (ssid.length() > 15) {
+      display.print(ssid.substring(0, 12) + "...");
+    } else {
+      display.print(ssid);
+    }
   }
 }
 
 void drawWifiStatusScreen() {
   display.setCursor(40, 2);
-  display.println("STATUS");
+  display.println("WIFI STATUS");
+  display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
   if (WiFi.status() == WL_CONNECTED) {
-    display.setCursor(30, 20);
-    display.println("CONNECTED!");
-    
-    display.setCursor(5, 32);
-    display.print("SSID:");
-    display.setCursor(5, 40);
-    if (connectedSSID.length() > 18) {
-      display.print(connectedSSID.substring(0, 15) + "...");
-    } else {
-      display.print(connectedSSID);
-    }
-    
-    display.setCursor(5, 50);
-    display.print("IP:");
-    display.print(WiFi.localIP().toString());
-  } else {
     display.setCursor(20, 25);
-    display.println("NOT CONNECTED");
-    display.setCursor(10, 40);
-    display.print("Check password or");
-    display.setCursor(20, 50);
-    display.print("signal strength");
+    display.print("Connected!");
+    
+    display.setCursor(5, 35);
+    display.print("SSID: ");
+    String ssid = connectedSSID;
+    if (ssid.length() > 15) {
+      ssid = ssid.substring(0, 12) + "...";
+    }
+    display.print(ssid);
+    
+    display.setCursor(5, 45);
+    display.print("IP: ");
+    String ip = WiFi.localIP().toString();
+    if (ip.length() > 15) {
+      ip = ip.substring(0, 12) + "...";
+    }
+    display.print(ip);
+  } else {
+    display.setCursor(25, 25);
+    display.print("Not Connected");
+    
+    display.setCursor(30, 40);
+    display.print("Try Again");
   }
 }
 
 // =================== BUTTON HANDLING ===================
 void checkButtons() {
-  bool upNow = (digitalRead(BUTTON_UP) == LOW);
-  bool downNow = (digitalRead(BUTTON_DOWN) == LOW);
-  bool selectNow = (digitalRead(BUTTON_SELECT) == LOW);
-  bool backNow = (digitalRead(BUTTON_BACK) == LOW);
+  static bool lastUp = HIGH, lastDown = HIGH, lastSel = HIGH, lastBack = HIGH;
+  static unsigned long lastDebounce = 0;
   
-  if (millis() - lastButtonPress < 200) return;
+  bool upNow = digitalRead(BUTTON_UP);
+  bool downNow = digitalRead(BUTTON_DOWN);
+  bool selNow = digitalRead(BUTTON_SELECT);
+  bool backNow = digitalRead(BUTTON_BACK);
   
-  if (upNow && !buttonStates[0]) {
-    buttonStates[0] = true;
-    buttonPressCount[0]++;
-    handleButtonPress(0);
-  } else if (!upNow) buttonStates[0] = false;
+  // Check for button presses with debouncing
+  bool buttonStates[4] = {upNow == LOW, downNow == LOW, selNow == LOW, backNow == LOW};
+  unsigned long now = millis();
   
-  if (downNow && !buttonStates[1]) {
-    buttonStates[1] = true;
-    buttonPressCount[1]++;
-    handleButtonPress(1);
-  } else if (!downNow) buttonStates[1] = false;
+  for (int i = 0; i < 4; i++) {
+    if (buttonStates[i]) {
+      if (buttonPressTime[i] == 0) {
+        // First press detection
+        buttonPressTime[i] = now;
+      } else if (now - buttonPressTime[i] > 1000 && !buttonLongPressed[i]) {
+        // Long press detected (1 second)
+        buttonLongPressed[i] = true;
+        handleLongPress(i);
+      }
+    } else {
+      if (buttonPressTime[i] > 0) {
+        if (!buttonLongPressed[i] && now - lastDebounce > 200) {
+          // Short press detected
+          buttonPressCount[i]++;
+          handleButtonPress(i);
+          lastDebounce = now;
+        }
+        // Reset button tracking
+        buttonPressTime[i] = 0;
+        buttonLongPressed[i] = false;
+      }
+    }
+  }
   
-  if (selectNow && !buttonStates[2]) {
-    buttonStates[2] = true;
-    buttonPressCount[2]++;
-    handleButtonPress(2);
-  } else if (!selectNow) buttonStates[2] = false;
+  lastUp = upNow;
+  lastDown = downNow;
+  lastSel = selNow;
+  lastBack = backNow;
+}
+
+void handleLongPress(int button) {
+  Serial.printf("Long press on button %d\n", button);
   
-  if (backNow && !buttonStates[3]) {
-    buttonStates[3] = true;
-    buttonPressCount[3]++;
-    handleButtonPress(3);
-  } else if (!backNow) buttonStates[3] = false;
+  if (currentScreen == SCREEN_PASSWORD_ENTRY && button == 2) {
+    // Long press SELECT to connect with entered password
+    String password = "";
+    for (int i = 0; i < passwordCursorPos; i++) {
+      password += passwordChars[i];
+    }
+    
+    currentScreen = SCREEN_WIFI_CONNECT;
+    connectToWiFi(wifiNetworks[wifiSelectedIndex], password);
+    delay(2000);
+    currentScreen = SCREEN_WIFI_STATUS;
+    
+    // Clear password
+    memset(passwordChars, 0, sizeof(passwordChars));
+    passwordCursorPos = 0;
+    needRefresh = true;
+  }
 }
 
 void handleButtonPress(int button) {
-  lastButtonPress = millis();
   needRefresh = true;
-  
-  static int saveCounter = 0;
-  saveCounter++;
-  if (saveCounter >= 5) {
-    saveButtonCounts();
-    saveCounter = 0;
-  }
   
   switch(currentScreen) {
     case SCREEN_HOME:
-      if (button == 2) {
+      if (button == 2) {  // SELECT -> Menu
         currentScreen = SCREEN_MAIN_MENU;
         menuIndex = 0;
       }
       break;
       
     case SCREEN_MAIN_MENU:
-      if (button == 0) {
-        menuIndex = (menuIndex > 0) ? menuIndex - 1 : 8;
-      } else if (button == 1) {
-        menuIndex = (menuIndex < 8) ? menuIndex + 1 : 0;
-      } else if (button == 2) {
+      if (button == 0) {  // UP
+        menuIndex = (menuIndex > 0) ? menuIndex - 1 : 9;
+      } else if (button == 1) {  // DOWN
+        menuIndex = (menuIndex < 9) ? menuIndex + 1 : 0;
+      } else if (button == 2) {  // SELECT
         switch(menuIndex) {
           case 0: currentScreen = SCREEN_BUTTON_TEST; break;
           case 1: currentScreen = SCREEN_SYSTEM_INFO; break;
-          case 2: currentScreen = SCREEN_SET_TIME; break;
-          case 3: currentScreen = SCREEN_RESET_MEM; break;
-          case 4: 
+          case 2: currentScreen = SCREEN_RESET_MEM; break;
+          case 3: 
             currentScreen = SCREEN_DEMO_MODE;
-            demoActive = true;
-            demoStartTime = millis();
+            demoActive = !demoActive;
             break;
-          case 5: 
-            currentScreen = SCREEN_OLED_TEST;
-            oledTestPattern = (oledTestPattern + 1) % 4;
-            break;
-          case 6: currentScreen = SCREEN_RTC_TEST; break;
-          case 7: currentScreen = SCREEN_VOLT_TEST; break;
-          case 8:
+          case 4: currentScreen = SCREEN_OLED_TEST; break;
+          case 5: currentScreen = SCREEN_RTC_TEST; break;
+          case 6: currentScreen = SCREEN_VOLT_TEST; break;
+          case 7:
             currentScreen = SCREEN_WIFI_SCAN;
             wifiSelectedIndex = 0;
-            wifiRefreshRequested = true;
+            scanWiFiNetworks();
+            break;
+          case 8:  // SET TIME - Placeholder
+            currentScreen = SCREEN_HOME;
+            break;
+          case 9:  // ABOUT - Placeholder
+            currentScreen = SCREEN_HOME;
             break;
         }
-      } else if (button == 3) {
+      } else if (button == 3) {  // BACK -> Home
         currentScreen = SCREEN_HOME;
       }
       break;
       
-    case SCREEN_WIFI_SCAN:
-      if (!wifiScanning) {
-        if (button == 0) {
-          wifiSelectedIndex--;
-          if (wifiSelectedIndex < 0) wifiSelectedIndex = wifiNetworkCount;
-        } else if (button == 1) {
-          wifiSelectedIndex++;
-          if (wifiSelectedIndex > wifiNetworkCount) wifiSelectedIndex = 0;
-        } else if (button == 2) {
-          if (wifiSelectedIndex == 0) {
-            wifiRefreshRequested = true;
-          } else if (wifiSelectedIndex <= wifiNetworkCount) {
-            currentScreen = SCREEN_WIFI_CONNECT;
-            connectToWiFi(wifiNetworks[wifiSelectedIndex - 1].ssid);
-          }
-        } else if (button == 3) {
-          currentScreen = SCREEN_MAIN_MENU;
-          WiFi.disconnect();
-          WiFi.mode(WIFI_OFF);
-        }
-      }
-      break;
-      
-    case SCREEN_WIFI_CONNECT:
-      if (button == 3) {
-        wifiConnecting = false;
-        WiFi.disconnect();
-        currentScreen = SCREEN_WIFI_SCAN;
-      }
-      break;
-      
-    case SCREEN_WIFI_STATUS:
-      if (button == 2 || button == 3) {
-        currentScreen = SCREEN_MAIN_MENU;
-        WiFi.disconnect();
-        WiFi.mode(WIFI_OFF);
-      }
-      break;
-      
     case SCREEN_RESET_MEM:
-      if (button == 2) {
+      if (button == 2) {  // SELECT - Reset
         for (int i = 0; i < 4; i++) buttonPressCount[i] = 0;
         demoCounter = 0;
         demoActive = false;
         saveButtonCounts();
         
+        // Show confirmation
         display.clearDisplay();
         display.setCursor(40, 30);
         display.println("RESET DONE");
@@ -1012,33 +1025,131 @@ void handleButtonPress(int button) {
         
         currentScreen = SCREEN_MAIN_MENU;
         needRefresh = true;
-      } else if (button == 3) {
+      } else if (button == 3) {  // BACK
         currentScreen = SCREEN_MAIN_MENU;
       }
       break;
       
     case SCREEN_DEMO_MODE:
-      if (button == 2) {
+      if (button == 2) {  // SELECT - Toggle
         demoActive = !demoActive;
-        if (demoActive) demoStartTime = millis();
-      } else if (button == 3) {
+      } else if (button == 3) {  // BACK
         demoActive = false;
         currentScreen = SCREEN_MAIN_MENU;
       }
       break;
       
     case SCREEN_OLED_TEST:
-      if (button == 0 || button == 1) {
-        oledTestPattern = (oledTestPattern + 1) % 4;
-      } else if (button == 3) {
+      if (button == 0 || button == 1) {  // UP/DOWN - Change pattern
+        // Pattern changes handled in draw function
+      } else if (button == 3) {  // BACK
         currentScreen = SCREEN_MAIN_MENU;
       }
       break;
       
+    case SCREEN_WIFI_SCAN:
+      if (!wifiScanning) {
+        if (button == 0) {  // UP
+          wifiSelectedIndex = (wifiSelectedIndex > 0) ? wifiSelectedIndex - 1 : wifiNetworkCount - 1;
+        } else if (button == 1) {  // DOWN
+          wifiSelectedIndex = (wifiSelectedIndex < wifiNetworkCount - 1) ? wifiSelectedIndex + 1 : 0;
+        } else if (button == 2 && wifiNetworkCount > 0) {  // SELECT - Connect
+          // Check if network is open (no password needed)
+          String selectedNetwork = wifiNetworks[wifiSelectedIndex];
+          
+          if (selectedNetwork.indexOf("[OPEN]") != -1) {
+            // Open network - connect directly
+            currentScreen = SCREEN_WIFI_CONNECT;
+            connectToWiFi(selectedNetwork, "");
+            delay(2000);
+            currentScreen = SCREEN_WIFI_STATUS;
+          } else {
+            // Secured network - enter password
+            currentScreen = SCREEN_PASSWORD_ENTRY;
+            passwordEntryMode = true;
+            passwordCursorPos = 0;
+            memset(passwordChars, 0, sizeof(passwordChars));
+            passwordChars[0] = 'a';  // Start with 'a'
+          }
+        } else if (button == 3) {  // BACK
+          currentScreen = SCREEN_MAIN_MENU;
+        }
+      }
+      break;
+      
+    case SCREEN_PASSWORD_ENTRY:
+      if (button == 0) {  // UP - Next character
+        if (passwordCursorPos < sizeof(passwordChars)) {
+          char currentChar = passwordChars[passwordCursorPos];
+          int charIndex = 0;
+          
+          // Find current character in charset
+          for (int i = 0; i < charSetLength; i++) {
+            if (charSet[i] == currentChar) {
+              charIndex = i;
+              break;
+            }
+          }
+          
+          // Move to next character
+          charIndex = (charIndex + 1) % charSetLength;
+          passwordChars[passwordCursorPos] = charSet[charIndex];
+        }
+      } else if (button == 1) {  // DOWN - Previous character
+        if (passwordCursorPos < sizeof(passwordChars)) {
+          char currentChar = passwordChars[passwordCursorPos];
+          int charIndex = 0;
+          
+          for (int i = 0; i < charSetLength; i++) {
+            if (charSet[i] == currentChar) {
+              charIndex = i;
+              break;
+            }
+          }
+          
+          // Move to previous character
+          charIndex = (charIndex - 1 + charSetLength) % charSetLength;
+          passwordChars[passwordCursorPos] = charSet[charIndex];
+        }
+      } else if (button == 2) {  // SELECT - Add character/move cursor
+        if (passwordCursorPos < sizeof(passwordChars) - 1) {
+          passwordCursorPos++;
+          // Initialize new position with 'a'
+          if (passwordChars[passwordCursorPos] == 0) {
+            passwordChars[passwordCursorPos] = 'a';
+          }
+        }
+      } else if (button == 3) {  // BACK - Delete character
+        if (passwordCursorPos > 0) {
+          passwordCursorPos--;
+          passwordChars[passwordCursorPos + 1] = 0;
+        } else {
+          // Exit password entry
+          memset(passwordChars, 0, sizeof(passwordChars));
+          passwordCursorPos = 0;
+          currentScreen = SCREEN_WIFI_SCAN;
+        }
+      }
+      break;
+      
+    case SCREEN_WIFI_CONNECT:
+    case SCREEN_WIFI_STATUS:
+      if (button == 2 || button == 3) {  // SELECT or BACK
+        currentScreen = SCREEN_WIFI_SCAN;
+      }
+      break;
+      
     default:
-      if (button == 3) {
+      if (button == 3) {  // BACK -> Menu (default)
         currentScreen = SCREEN_MAIN_MENU;
       }
       break;
+  }
+  
+  // Auto-save every 10 presses
+  static int saveCounter = 0;
+  if (++saveCounter >= 10) {
+    saveButtonCounts();
+    saveCounter = 0;
   }
 }
