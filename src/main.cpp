@@ -1,5 +1,5 @@
 /**
- * ESP32 TEST CODE - FINAL COMPLETE FIX
+ * ESP32 TEST CODE - WITH DATE DISPLAY
  * SH1106 OLED (128x64) + DS3231 RTC + 4 Buttons
  */
 
@@ -60,6 +60,9 @@ int demoCounter = 0;
 // Test pattern variables
 int oledTestPattern = 0;
 
+// Day of week names
+const char* dayNames[7] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
+
 // =================== FUNCTION DECLARATIONS ===================
 void initializeHardware();
 void showScreen();
@@ -99,8 +102,8 @@ void initializeHardware() {
   Wire.begin(OLED_SDA, OLED_SCL);
   Wire.setClock(100000);
   
-  if (!display.begin(0x3C, OLED_RESET)) {
-    if (!display.begin(0x3D, OLED_RESET)) {
+  if (!display.begin(0x3C, true)) {
+    if (!display.begin(0x3D, true)) {
       Serial.println("OLED not found!");
       while(1);
     }
@@ -521,13 +524,25 @@ void drawRtcTest() {
   
   if (rtc.begin()) {
     DateTime now = rtc.now();
-    display.setCursor(40, 40);
+    
+    // Show time in large font
+    display.setCursor(35, 30);
     display.setTextSize(2);
     display.printf("%02d:%02d", now.hour(), now.minute());
     display.setTextSize(1);
+    
+    // Show date below time
+    display.setCursor(30, 50);
+    display.printf("%02d/%02d/%04d", now.day(), now.month(), now.year());
+    
+    // Show day of week on the right
+    display.setCursor(90, 50);
+    display.print(dayNames[now.dayOfTheWeek()]);
   } else {
-    display.setCursor(35, 40);
+    display.setCursor(35, 35);
     display.println("NO RTC");
+    display.setCursor(20, 45);
+    display.println("Check I2C wiring");
   }
 }
 
