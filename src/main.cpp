@@ -699,7 +699,7 @@ void sendEnrollmentConfirmation(int rollNo, int fingerprintId) {
   
   if (httpCode == 200) {
     enrollState = ENROLL_SUCCESS;
-    showNotificationMsg("✅ Success!");
+    showNotificationMsg("Success!");
     
     delay(1000);
     resetEnrollmentState();
@@ -816,7 +816,7 @@ void drawFooter() {
       
     case SCREEN_ENROLL_MODE:
       if (enrollState == ENROLL_PENDING) {
-        display.setCursor(35, 56);
+        display.setCursor(35, 53);  // CHANGED: Was 56, moved up 3 pixels
         display.print("SEL=START");
       } else if (enrollState == ENROLL_CAPTURING) {
         display.setCursor(45, 56);
@@ -879,8 +879,6 @@ void drawHomeScreen() {
     display.setCursor(70, 40);
     display.print("FP: ");
     display.print(fingerprintInitialized ? "OK" : "ERR");
-    
-    // Removed "System: READY" and "Enroll: READY" to reduce clutter
     
   } else {
     display.setCursor(35, 25);
@@ -970,7 +968,7 @@ void drawEnrollmentScreen() {
         display.print(pendingStudentName);
       }
       
-      display.setCursor(20, 50);
+      display.setCursor(20, 49);  // CHANGED: Was 50, moved up 1 pixel
       display.print("Press SELECT");
       break;
       
@@ -1252,11 +1250,11 @@ void drawAboutScreen() {
   display.setCursor(35, 35);
   display.println("SYSTEM v3.2");
   
-  display.setCursor(5, 50);
+  display.setCursor(5, 48);  // CHANGED: Was 50, moved up 2 pixels
   display.print("Sensor: ");
   display.print(fingerprintInitialized ? "OK" : "ERR");
   
-  display.setCursor(70, 50);
+  display.setCursor(70, 48);  // CHANGED: Was 50, moved up 2 pixels
   display.print("WiFi: ");
   display.print(WiFi.status() == WL_CONNECTED ? "ON" : "OFF");
 }
