@@ -1,8 +1,7 @@
 /**
- * ESP32 SMART ENROLL SYSTEM - COMPLETE FIXED VERSION
- * IoT Biometric Attendance System with Smart Enroll Feature
- * Version: 3.1 Production - Compatible Version
- * Date: January 2025
+ * ESP32 SMART ENROLL SYSTEM - OPTIMIZED ENROLLMENT
+ * Fastest possible fingerprint enrollment for R307 sensor
+ * Version: 3.2 Fast Enroll
  */
 
 #include <Wire.h>
@@ -116,15 +115,18 @@ String pendingStudentName = "";
 int pendingStudentRoll = -1;
 bool studentInProgress = false;
 unsigned long enrollmentStartTime = 0;
-const unsigned long ENROLLMENT_TIMEOUT = 30000; // 30 seconds
+const unsigned long ENROLLMENT_TIMEOUT = 25000; // Reduced from 30 to 25 seconds
 int enrollmentRetryCount = 0;
 const int MAX_ENROLLMENT_RETRIES = 3;
 
-// Fingerprint enrollment tracking
+// Fingerprint enrollment tracking - OPTIMIZED TIMINGS
 unsigned long fpStateStartTime = 0;
 int fpRetryCount = 0;
 const int MAX_FP_RETRIES = 2;
 String lastFingerprintError = "";
+bool firstCaptureDone = false;
+bool secondCaptureDone = false;
+unsigned long lastCaptureTime = 0;
 
 // Server Polling
 unsigned long lastPollTime = 0;
@@ -134,7 +136,7 @@ const unsigned long POLL_INTERVAL = 2000;
 bool notificationActive = false;
 String notificationMessage = "";
 unsigned long notificationStartTime = 0;
-const unsigned long NOTIFICATION_DURATION = 3000;
+const unsigned long NOTIFICATION_DURATION = 2000; // Shorter notifications
 wl_status_t lastWifiStatus = WL_IDLE_STATUS;
 
 // Day and month names
@@ -159,10 +161,10 @@ void manualRefreshWiFi();
 void attemptEmptyPasswordConnection(String ssid);
 void pollServerForEnrollment();
 void handleFingerprintEnrollment();
+void handleFingerprintEnrollmentFast(); // NEW: Fast enrollment function
 void sendEnrollmentConfirmation(int rollNo, int fingerprintId);
 void resetEnrollmentState();
 void resetFingerprintState();
-void testFingerprintSensor();
 void showDetailedError(int errorCode);
 
 // Screen drawing functions
@@ -183,8 +185,8 @@ void setup() {
   delay(1000);
   
   Serial.println("\n╔══════════════════════════════════╗");
-  Serial.println("║   SMART ENROLL SYSTEM v3.1      ║");
-  Serial.println("║   COMPATIBLE VERSION            ║");
+  Serial.println("║   SMART ENROLL SYSTEM v3.2      ║");
+  Serial.println("║   FAST ENROLLMENT VERSION       ║");
   Serial.println("╚══════════════════════════════════╝");
   
   initializeHardware();
@@ -192,27 +194,19 @@ void setup() {
   
   currentScreen = SCREEN_BOOT;
   showScreen();
-  delay(2000);
+  delay(1500); // Shorter boot delay
   
   currentScreen = SCREEN_HOME;
   needRefresh = true;
   
   lastWifiStatus = WiFi.status();
   
-  Serial.println("System ready!");
+  Serial.println("System ready for fast enrollment!");
 }
 
 // =================== INITIALIZE PREFERENCES ===================
 void initializePreferences() {
   preferences.begin("enroll_system", false);
-  
-  // Load saved WiFi credentials if any
-  String savedSSID = preferences.getString("wifi_ssid", "");
-  String savedPass = preferences.getString("wifi_pass", "");
-  
-  if (savedSSID.length() > 0) {
-    Serial.println("Found saved WiFi credentials for: " + savedSSID);
-  }
 }
 
 // =================== INITIALIZE HARDWARE ===================
@@ -235,7 +229,7 @@ void initializeHardware() {
   
   // Initialize RTC
   if (!rtc.begin()) {
-    Serial.println("⚠️ RTC not found - using system time");
+    Serial.println("⚠️ RTC not found");
   } else {
     if (rtc.lostPower()) {
       rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
@@ -250,68 +244,43 @@ void initializeHardware() {
   pinMode(BUTTON_BACK, INPUT_PULLUP);
   Serial.println("✅ Buttons initialized");
   
-  // Initialize Fingerprint Sensor with robust initialization
+  // Initialize Fingerprint Sensor - OPTIMIZED
   Serial.println("Initializing fingerprint sensor...");
   fingerSerial.begin(57600, SERIAL_8N1, FINGERPRINT_RX, FINGERPRINT_TX);
-  delay(1500); // Give sensor extra time to initialize
+  delay(1000); // Shorter initialization delay
   
-  // Try multiple times to connect to fingerprint sensor
-  for (int attempt = 1; attempt <= 3; attempt++) {
+  // Try to connect to fingerprint sensor
+  for (int attempt = 1; attempt <= 2; attempt++) { // Only 2 attempts
     Serial.print("Fingerprint sensor attempt ");
     Serial.print(attempt);
-    Serial.print("/3... ");
+    Serial.print("/2... ");
     
     if (finger.verifyPassword()) {
       fingerprintInitialized = true;
       Serial.println("✅ SUCCESS");
       
-      // Get template count
+      // Get template count quickly
       int templateCount = finger.getTemplateCount();
-      Serial.print("Templates in sensor: ");
+      Serial.print("Templates: ");
       Serial.println(templateCount);
       
       break;
     } else {
       Serial.println("❌ FAILED");
-      delay(1000);
+      delay(500); // Shorter retry delay
     }
   }
   
   if (!fingerprintInitialized) {
     Serial.println("❌ FINGERPRINT SENSOR NOT FOUND!");
-    Serial.println("Check wiring: TX->GPIO4, RX->GPIO2");
-    Serial.println("Check power: 3.3V stable supply required");
   }
   
   // Initialize WiFi
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
-  delay(100);
+  delay(50); // Minimal delay
   
   Serial.println("✅ Hardware initialization complete");
-}
-
-// =================== TEST FINGERPRINT SENSOR ===================
-void testFingerprintSensor() {
-  if (!fingerprintInitialized) return;
-  
-  Serial.println("\n🔍 Fingerprint Sensor Diagnostic:");
-  Serial.println("══════════════════════════════════");
-  
-  // Check communication
-  if (finger.verifyPassword()) {
-    Serial.println("✓ Communication: OK");
-  } else {
-    Serial.println("✗ Communication: FAILED");
-    return;
-  }
-  
-  // Get template count
-  int templateCount = finger.getTemplateCount();
-  Serial.print("✓ Templates stored: ");
-  Serial.println(templateCount);
-  
-  Serial.println("══════════════════════════════════\n");
 }
 
 // =================== MAIN LOOP ===================
@@ -330,15 +299,15 @@ void loop() {
     }
   }
   
-  // Handle fingerprint enrollment process
+  // Handle fingerprint enrollment process - USING FAST VERSION
   if (enrollState == ENROLL_CAPTURING) {
-    handleFingerprintEnrollment();
+    handleFingerprintEnrollmentFast(); // Using optimized function
   }
   
   // Check for enrollment timeout
   if (studentInProgress && (millis() - enrollmentStartTime > ENROLLMENT_TIMEOUT)) {
-    Serial.println("⏰ Enrollment timeout - resetting");
-    showNotificationMsg("Timeout - Reset");
+    Serial.println("⏰ Enrollment timeout");
+    showNotificationMsg("Timeout");
     resetEnrollmentState();
   }
   
@@ -352,13 +321,13 @@ void loop() {
   
   // Screen refresh management
   static unsigned long lastUpdate = 0;
-  if (millis() - lastUpdate > 250 || needRefresh) {
+  if (millis() - lastUpdate > 200 || needRefresh) { // Faster refresh
     showScreen();
     lastUpdate = millis();
     needRefresh = false;
   }
   
-  delay(30); // Reduced delay for more responsive buttons
+  delay(20); // Much faster loop for responsiveness
 }
 
 // =================== WIFI FUNCTIONS ===================
@@ -368,13 +337,6 @@ void checkWifiStatusChange() {
   if (currentStatus != lastWifiStatus) {
     needRefresh = true;
     lastWifiStatus = currentStatus;
-    
-    // Show connection status notifications
-    if (currentStatus == WL_CONNECTED && lastWifiStatus != WL_CONNECTED) {
-      showNotificationMsg("WiFi Connected");
-    } else if (currentStatus == WL_DISCONNECTED && lastWifiStatus == WL_CONNECTED) {
-      showNotificationMsg("WiFi Disconnected");
-    }
   }
 }
 
@@ -384,7 +346,7 @@ void showNotificationMsg(String message) {
   notificationStartTime = millis();
   needRefresh = true;
   
-  // Also log to serial for debugging
+  // Log to serial for debugging
   Serial.println("📢 " + message);
 }
 
@@ -417,9 +379,9 @@ void scanWiFiNetworks() {
   
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
-  delay(100);
+  delay(50);
   
-  showNotificationMsg("Scanning WiFi...");
+  showNotificationMsg("Scanning...");
   
   int16_t n = WiFi.scanNetworks();
   
@@ -458,7 +420,7 @@ void scanWiFiNetworks() {
   wifiScanning = false;
   
   if (wifiNetworkCount == 0) {
-    showNotificationMsg("No networks found");
+    showNotificationMsg("No networks");
   } else {
     showNotificationMsg(String(wifiNetworkCount) + " networks");
   }
@@ -475,36 +437,26 @@ void connectToWiFi(String ssid, String password) {
   }
   
   showNotificationMsg("Connecting...");
-  Serial.println("Connecting to WiFi: " + ssid);
   
   WiFi.begin(ssid.c_str(), password.c_str());
   
   int attempts = 0;
-  while (attempts < 25) { // Increased timeout
+  while (attempts < 15) { // Faster timeout
     if (WiFi.status() == WL_CONNECTED) {
       connectedSSID = ssid;
       wifiConnecting = false;
       needRefresh = true;
-      
-      // Save credentials
-      preferences.putString("wifi_ssid", ssid);
-      if (password.length() > 0) {
-        preferences.putString("wifi_pass", password);
-      }
-      
       showNotificationMsg("Connected!");
-      Serial.println("WiFi connected! IP: " + WiFi.localIP().toString());
       break;
     }
-    delay(500);
+    delay(300); // Faster checking
     attempts++;
   }
   
   if (WiFi.status() != WL_CONNECTED) {
     wifiConnecting = false;
     needRefresh = true;
-    showNotificationMsg("Connection failed");
-    Serial.println("WiFi connection failed");
+    showNotificationMsg("Failed");
   }
 }
 
@@ -515,24 +467,18 @@ void pollServerForEnrollment() {
     return;
   }
   
-  Serial.println("Polling server for enrollment...");
-  
   HTTPClient http;
   http.begin(BACKEND_URL + "/api/next-enrollment");
-  http.setTimeout(5000);
+  http.setTimeout(3000); // Shorter timeout
   
   int httpCode = http.GET();
   
   if (httpCode == 200) {
     String payload = http.getString();
-    Serial.println("Server response: " + payload);
-    
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, payload);
     
     if (error) {
-      Serial.print("JSON parse error: ");
-      Serial.println(error.c_str());
       return;
     }
     
@@ -542,220 +488,174 @@ void pollServerForEnrollment() {
       String newName = doc["name"].as<String>();
       int newRoll = doc["rollNo"];
       
-      // Only update if it's a different student
-      if (pendingStudentRoll != newRoll || pendingStudentName != newName) {
+      if (pendingStudentRoll != newRoll) {
         pendingStudentName = newName;
         pendingStudentRoll = newRoll;
         enrollState = ENROLL_PENDING;
         studentInProgress = false;
         needRefresh = true;
         
-        Serial.print("New student ready: ");
-        Serial.print(newRoll);
-        Serial.print(" - ");
-        Serial.println(newName);
-        
-        showNotificationMsg("Student ready!");
+        showNotificationMsg("Ready!");
       }
     } else {
-      // No pending students
       if (enrollState != ENROLL_IDLE) {
         enrollState = ENROLL_IDLE;
         needRefresh = true;
       }
     }
-  } else {
-    Serial.print("HTTP error: ");
-    Serial.println(httpCode);
-    showNotificationMsg("Server error");
   }
   
   http.end();
 }
 
-// =================== ROBUST FINGERPRINT ENROLLMENT ===================
-void handleFingerprintEnrollment() {
-  static unsigned long lastFingerCheck = 0;
+// =================== OPTIMIZED FINGERPRINT ENROLLMENT ===================
+// This is the FASTEST possible enrollment for R307
+void handleFingerprintEnrollmentFast() {
   static unsigned long stateStartTime = 0;
-  static int result; // Declare outside switch to avoid cross-initialization
+  static int result;
   
-  // Initialize state start time
+  // Initialize
   if (fpState == FP_IDLE) {
     stateStartTime = millis();
     fpStateStartTime = millis();
-    Serial.println("Starting fingerprint enrollment...");
+    firstCaptureDone = false;
+    secondCaptureDone = false;
+    Serial.println("Starting FAST enrollment...");
+    fpState = FP_WAIT_FOR_FIRST;
+    showNotificationMsg("Place finger");
   }
   
-  // Check for overall timeout
-  if (millis() - fpStateStartTime > ENROLLMENT_TIMEOUT) {
-    Serial.println("Fingerprint enrollment timeout");
-    showNotificationMsg("Timeout - Start over");
+  // Check timeout
+  if (millis() - fpStateStartTime > 20000) { // 20 second timeout
+    Serial.println("Enrollment timeout");
+    showNotificationMsg("Too slow");
     resetFingerprintState();
     enrollState = ENROLL_ERROR;
     return;
   }
   
-  // Check for state timeout (15 seconds per state)
-  if (millis() - stateStartTime > 15000) {
-    Serial.print("State timeout in state: ");
-    Serial.println(fpState);
-    showNotificationMsg("Too slow - Retry");
-    resetFingerprintState();
-    fpState = FP_WAIT_FOR_FIRST;
-    stateStartTime = millis();
-    fpRetryCount++;
-    
-    if (fpRetryCount >= MAX_FP_RETRIES) {
-      enrollState = ENROLL_ERROR;
-      showNotificationMsg("Max retries reached");
-      return;
-    }
-    return;
-  }
-  
   switch(fpState) {
-    case FP_IDLE:
-      fpState = FP_WAIT_FOR_FIRST;
-      showNotificationMsg("Place finger");
-      Serial.println("State: Waiting for first finger");
-      stateStartTime = millis();
-      break;
-      
     case FP_WAIT_FOR_FIRST:
-      if (millis() - lastFingerCheck > 500) {
+      // Check for finger every 200ms (faster)
+      if (millis() - stateStartTime > 200) {
         result = finger.getImage();
         
         if (result == FINGERPRINT_OK) {
-          Serial.println("First finger detected");
+          Serial.println("First capture");
           fpState = FP_CAPTURE_FIRST;
-          showNotificationMsg("Hold steady...");
-          stateStartTime = millis();
-        } 
-        else if (result != FINGERPRINT_NOFINGER) {
-          Serial.print("Sensor error: ");
-          Serial.println(result);
+          showNotificationMsg("Hold...");
         }
-        
-        lastFingerCheck = millis();
+        stateStartTime = millis();
       }
       break;
       
     case FP_CAPTURE_FIRST:
-      delay(400); // Important: Wait for stable reading
+      delay(200); // Minimal stabilization
       
       result = finger.image2Tz(1);
       if (result == FINGERPRINT_OK) {
-        Serial.println("First image captured successfully");
-        showNotificationMsg("Remove finger");
+        Serial.println("First image OK");
+        firstCaptureDone = true;
+        showNotificationMsg("Lift finger");
         fpState = FP_WAIT_FOR_REMOVAL;
         stateStartTime = millis();
       } else {
-        Serial.println("First image capture failed");
-        showNotificationMsg("Capture failed");
+        Serial.println("First capture failed");
+        showNotificationMsg("Failed - Retry");
         fpState = FP_FAILED;
       }
       break;
       
     case FP_WAIT_FOR_REMOVAL:
-      if (millis() - lastFingerCheck > 500) {
+      // Wait for finger to be lifted - check every 200ms
+      if (millis() - stateStartTime > 200) {
         result = finger.getImage();
         
         if (result == FINGERPRINT_NOFINGER) {
           Serial.println("Finger removed");
-          showNotificationMsg("Place SAME finger");
-          delay(1200); // CRITICAL: Wait for sensor to reset completely
+          showNotificationMsg("Place again");
+          delay(600); // MINIMUM wait for sensor reset (cannot be shorter!)
           fpState = FP_WAIT_FOR_SECOND;
           stateStartTime = millis();
-        } 
-        else if (result == FINGERPRINT_OK) {
-          showNotificationMsg("Remove finger now");
+        } else if (result == FINGERPRINT_OK) {
+          showNotificationMsg("Lift now!");
         }
-        
-        lastFingerCheck = millis();
+        stateStartTime = millis();
       }
       break;
       
     case FP_WAIT_FOR_SECOND:
-      if (millis() - lastFingerCheck > 500) {
+      // Wait for finger to be placed again - check every 200ms
+      if (millis() - stateStartTime > 200) {
         result = finger.getImage();
         
         if (result == FINGERPRINT_OK) {
-          Serial.println("Second finger detected");
+          Serial.println("Second capture");
           fpState = FP_CAPTURE_SECOND;
-          showNotificationMsg("Capturing...");
-          stateStartTime = millis();
-        } 
-        else if (result != FINGERPRINT_NOFINGER) {
-          Serial.print("Sensor error: ");
-          Serial.println(result);
+          showNotificationMsg("Hold...");
         }
-        
-        lastFingerCheck = millis();
+        stateStartTime = millis();
       }
       break;
       
     case FP_CAPTURE_SECOND:
-      delay(400); // Wait for stable reading
+      delay(200); // Minimal stabilization
       
       result = finger.image2Tz(2);
       if (result == FINGERPRINT_OK) {
-        Serial.println("Second image captured");
+        Serial.println("Second image OK");
+        secondCaptureDone = true;
         showNotificationMsg("Processing...");
         fpState = FP_PROCESSING;
         stateStartTime = millis();
       } else {
-        Serial.println("Second image capture failed");
-        showNotificationMsg("Capture failed");
+        Serial.println("Second capture failed");
+        showNotificationMsg("Failed - Retry");
         fpState = FP_FAILED;
       }
       break;
       
     case FP_PROCESSING:
-      Serial.println("Creating fingerprint model...");
-      
+      // Process immediately
       result = finger.createModel();
       
       if (result == FINGERPRINT_OK) {
-        Serial.println("Model created successfully");
+        Serial.println("Model created");
         showNotificationMsg("Storing...");
         
-        // Store with student's roll number as ID
         result = finger.storeModel(pendingStudentRoll);
         
         if (result == FINGERPRINT_OK) {
-          Serial.print("Fingerprint stored with ID: ");
+          Serial.print("Stored ID: ");
           Serial.println(pendingStudentRoll);
           fpState = FP_COMPLETE;
           enrollState = ENROLL_UPLOADING;
           sendEnrollmentConfirmation(pendingStudentRoll, pendingStudentRoll);
-        } 
-        else {
-          Serial.print("Store failed, error code: ");
+        } else {
+          Serial.print("Store failed: ");
           Serial.println(result);
           showDetailedError(result);
           fpState = FP_FAILED;
         }
-      } 
-      else if (result == FINGERPRINT_ENROLLMISMATCH) {
-        Serial.println("ERROR: Fingerprints don't match");
-        showNotificationMsg("Fingers don't match");
+      } else if (result == FINGERPRINT_ENROLLMISMATCH) {
+        Serial.println("Fingers don't match");
+        showNotificationMsg("Mismatch - Retry");
         fpState = FP_FAILED;
-      }
-      else {
-        Serial.print("ERROR: Create model failed, code: ");
+      } else {
+        Serial.print("Model failed: ");
         Serial.println(result);
-        showNotificationMsg("Model failed");
+        showNotificationMsg("Failed");
         fpState = FP_FAILED;
       }
       break;
       
     case FP_COMPLETE:
-      // Enrollment complete, waiting for upload
+      // Waiting for upload
       break;
       
     case FP_FAILED:
-      // Wait and reset
-      delay(2000);
+      // Quick reset
+      delay(1000);
       resetFingerprintState();
       enrollState = ENROLL_ERROR;
       needRefresh = true;
@@ -764,7 +664,7 @@ void handleFingerprintEnrollment() {
 }
 
 void showDetailedError(int errorCode) {
-  // Simple error mapping for older library versions
+  // Simple error messages
   switch(errorCode) {
     case FINGERPRINT_OK:
       lastFingerprintError = "Success";
@@ -773,16 +673,10 @@ void showDetailedError(int errorCode) {
       lastFingerprintError = "No finger";
       break;
     case FINGERPRINT_IMAGEFAIL:
-      lastFingerprintError = "Image capture failed";
-      break;
-    case FINGERPRINT_IMAGEMESS:
-      lastFingerprintError = "Image too messy";
-      break;
-    case FINGERPRINT_PACKETRESPONSEFAIL:
-      lastFingerprintError = "Packet response failed";
+      lastFingerprintError = "Image failed";
       break;
     case FINGERPRINT_ENROLLMISMATCH:
-      lastFingerprintError = "Finger mismatch";
+      lastFingerprintError = "Mismatch";
       break;
     case FINGERPRINT_BADLOCATION:
       lastFingerprintError = "Bad location";
@@ -791,29 +685,27 @@ void showDetailedError(int errorCode) {
       lastFingerprintError = "Flash error";
       break;
     default:
-      lastFingerprintError = "Error code: " + String(errorCode);
+      lastFingerprintError = "Error " + String(errorCode);
       break;
   }
   
-  Serial.print("Fingerprint error: ");
-  Serial.println(lastFingerprintError);
-  showNotificationMsg("Error: " + lastFingerprintError);
+  showNotificationMsg(lastFingerprintError);
 }
 
 void sendEnrollmentConfirmation(int rollNo, int fingerprintId) {
   if (WiFi.status() != WL_CONNECTED) {
     enrollState = ENROLL_ERROR;
-    showNotificationMsg("No WiFi connection");
+    showNotificationMsg("No WiFi");
     return;
   }
   
-  Serial.print("Sending enrollment confirmation for Roll ");
+  Serial.print("Sending confirmation for Roll ");
   Serial.println(rollNo);
   
   HTTPClient http;
   http.begin(BACKEND_URL + "/api/enroll-confirm");
   http.addHeader("Content-Type", "application/json");
-  http.setTimeout(10000);
+  http.setTimeout(8000); // Faster timeout
   
   JsonDocument doc;
   doc["rollNo"] = rollNo;
@@ -822,32 +714,16 @@ void sendEnrollmentConfirmation(int rollNo, int fingerprintId) {
   String json;
   serializeJson(doc, json);
   
-  Serial.println("Sending JSON: " + json);
   int httpCode = http.POST(json);
   
   if (httpCode == 200) {
-    String response = http.getString();
-    Serial.println("Server response: " + response);
+    enrollState = ENROLL_SUCCESS;
+    showNotificationMsg("✅ Success!");
     
-    JsonDocument resDoc;
-    DeserializationError error = deserializeJson(resDoc, response);
-    
-    if (!error && resDoc["success"]) {
-      enrollState = ENROLL_SUCCESS;
-      showNotificationMsg("✅ Enrollment Complete!");
-      Serial.println("Enrollment successful!");
-      
-      // Reset after showing success
-      delay(2000);
-      resetEnrollmentState();
-    } else {
-      enrollState = ENROLL_ERROR;
-      showNotificationMsg("Server error");
-      Serial.println("Server returned error");
-    }
+    // Quick reset
+    delay(1000);
+    resetEnrollmentState();
   } else {
-    Serial.print("HTTP Error: ");
-    Serial.println(httpCode);
     enrollState = ENROLL_ERROR;
     showNotificationMsg("Upload failed");
   }
@@ -864,21 +740,18 @@ void resetEnrollmentState() {
   fpRetryCount = 0;
   needRefresh = true;
   
-  // Keep student info for a moment so user can see completion
-  delay(1500);
+  // Quick clear
+  delay(500);
   pendingStudentName = "";
   pendingStudentRoll = -1;
-  
-  Serial.println("Enrollment state reset");
 }
 
 void resetFingerprintState() {
   fpState = FP_IDLE;
   fpRetryCount = 0;
-  Serial.println("Fingerprint state reset");
 }
 
-// =================== DISPLAY FUNCTIONS ===================
+// =================== DISPLAY FUNCTIONS - OPTIMIZED ===================
 void showScreen() {
   if (!displayInitialized) return;
   
@@ -919,17 +792,15 @@ void showScreen() {
   
   drawFooter();
   
-  // Show notification overlay
+  // Notification
   if (notificationActive && notificationMessage.length() > 0) {
     display.fillRect(0, 50, 128, 14, SH110X_WHITE);
     display.setTextColor(SH110X_BLACK);
     display.setCursor(4, 52);
     
-    String displayMsg = notificationMessage;
-    if (displayMsg.length() > 18) {
-      displayMsg = displayMsg.substring(0, 16) + "..";
-    }
-    display.print(displayMsg);
+    String msg = notificationMessage;
+    if (msg.length() > 18) msg = msg.substring(0, 16) + "..";
+    display.print(msg);
     
     display.setTextColor(SH110X_WHITE);
   }
@@ -963,36 +834,10 @@ void drawFooter() {
       } else if (enrollState == ENROLL_CAPTURING) {
         display.setCursor(45, 56);
         display.print("BUSY");
-      } else if (enrollState == ENROLL_SUCCESS) {
-        display.setCursor(45, 56);
-        display.print("DONE");
-      } else if (enrollState == ENROLL_ERROR) {
-        display.setCursor(40, 56);
-        display.print("SEL=RETRY");
       } else {
         display.setCursor(45, 56);
         display.print("READY");
       }
-      break;
-      
-    case SCREEN_WIFI_SCAN:
-      if (!wifiScanning) {
-        display.setCursor(5, 56);
-        display.print("SEL=REF");
-        display.setCursor(50, 56);
-        display.print("L=C");
-        display.setCursor(85, 56);
-        display.print("B=MENU");
-      }
-      break;
-      
-    case SCREEN_PASSWORD_ENTRY:
-      display.setCursor(5, 56);
-      display.print("U/D=CHR");
-      display.setCursor(50, 56);
-      display.print("SEL=NXT");
-      display.setCursor(90, 56);
-      display.print("B=BACK");
       break;
       
     default:
@@ -1011,59 +856,42 @@ void drawBootScreen() {
   display.setCursor(30, 35);
   display.println("ENROLL");
   display.setTextSize(1);
-  display.setCursor(45, 56);
-  display.print("v3.1 COMPATIBLE");
+  display.setCursor(40, 56);
+  display.print("v3.2 FAST");
 }
 
 void drawHomeScreen() {
   if (rtc.begin()) {
     DateTime now = rtc.now();
     
-    // Date line (top)
+    // Compact date/time
     display.setCursor(5, 0);
-    display.printf("%s %02d %s", 
+    display.printf("%s %02d %s %04d", 
                   dayNames[now.dayOfTheWeek()], 
                   now.day(),
-                  monthNames[now.month()-1]);
+                  monthNames[now.month()-1],
+                  now.year());
     
-    // Year (right aligned)
-    display.setCursor(90, 0);
-    display.printf("%04d", now.year());
-    
-    // Time (center)
     display.setCursor(30, 15);
     display.setTextSize(2);
     display.printf("%02d:%02d", now.hour(), now.minute());
     display.setTextSize(1);
     
-    // Status line
+    // Status
     display.setCursor(5, 35);
-    display.print("Status: ");
-    if (WiFi.status() == WL_CONNECTED) {
-      display.print("ONLINE");
-    } else {
-      display.print("OFFLINE");
-    }
+    display.print("WiFi: ");
+    display.print(WiFi.status() == WL_CONNECTED ? "ON" : "OFF");
     
-    // Fingerprint sensor status
     display.setCursor(5, 45);
     display.print("Sensor: ");
-    if (fingerprintInitialized) {
-      display.print("READY");
-    } else {
-      display.print("ERROR");
-    }
+    display.print(fingerprintInitialized ? "OK" : "ERR");
     
-    // Enrollment status
     display.setCursor(5, 55);
-    display.print("Enroll: IDLE");
+    display.print("Enroll: READY");
     
   } else {
-    // RTC not found
-    display.setCursor(35, 20);
-    display.println("RTC ERROR");
-    display.setCursor(30, 35);
-    display.println("Check RTC Module");
+    display.setCursor(35, 25);
+    display.println("NO RTC");
   }
 }
 
@@ -1101,34 +929,24 @@ void drawEnrollmentScreen() {
   display.println("ENROLL");
   display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
-  // WiFi indicator
+  // Indicators
   display.setCursor(100, 0);
-  if (WiFi.status() == WL_CONNECTED) {
-    display.print("WIFI");
-  } else {
-    display.print("NO NET");
-  }
+  display.print(WiFi.status() == WL_CONNECTED ? "WIFI" : "NO NET");
   
-  // Sensor indicator
   display.setCursor(0, 0);
-  if (fingerprintInitialized) {
-    display.print("FP:OK");
-  } else {
-    display.print("FP:ERR");
-  }
+  display.print(fingerprintInitialized ? "FP:OK" : "FP:ERR");
   
   switch(enrollState) {
     case ENROLL_IDLE:
       display.setCursor(25, 25);
       display.println("Waiting...");
       display.setCursor(20, 40);
-      display.println("Polling server");
+      display.println("for student");
       break;
       
     case ENROLL_PENDING:
       display.setCursor(35, 15);
       display.println("STUDENT");
-      display.drawLine(30, 23, 98, 23, SH110X_WHITE);
       
       display.setCursor(5, 30);
       display.print("Roll: ");
@@ -1147,134 +965,94 @@ void drawEnrollmentScreen() {
       break;
       
     case ENROLL_CAPTURING:
-      // Show step-by-step guidance
-      display.setCursor(35, 15);
-      
+      // Fast enrollment instructions
       switch(fpState) {
         case FP_WAIT_FOR_FIRST:
-          display.println("STEP 1/3");
-          display.setCursor(15, 30);
-          display.println("Place finger on");
-          display.setCursor(40, 42);
-          display.println("sensor");
+          display.setCursor(30, 20);
+          display.println("STEP 1");
+          display.setCursor(20, 35);
+          display.println("Place finger");
           break;
         case FP_WAIT_FOR_REMOVAL:
-          display.println("STEP 2/3");
-          display.setCursor(10, 30);
-          display.println("Remove finger");
-          display.setCursor(30, 42);
-          display.println("now");
+          display.setCursor(30, 20);
+          display.println("STEP 2");
+          display.setCursor(15, 35);
+          display.println("Lift finger");
           break;
         case FP_WAIT_FOR_SECOND:
-          display.println("STEP 3/3");
-          display.setCursor(10, 30);
-          display.println("Place same");
-          display.setCursor(30, 42);
-          display.println("finger");
-          break;
-        case FP_PROCESSING:
-          display.println("PROCESSING");
-          display.setCursor(25, 30);
-          display.println("Creating");
-          display.setCursor(35, 42);
-          display.println("template");
+          display.setCursor(30, 20);
+          display.println("STEP 3");
+          display.setCursor(15, 35);
+          display.println("Place again");
           break;
         default:
-          display.println("CAPTURING");
-          display.setCursor(30, 35);
-          display.println("Fingerprint");
+          display.setCursor(30, 25);
+          display.println("PROCESSING");
           break;
       }
-      break;
-      
-    case ENROLL_UPLOADING:
-      display.setCursor(30, 25);
-      display.println("UPLOADING");
-      display.setCursor(20, 40);
-      display.println("Please wait...");
       break;
       
     case ENROLL_SUCCESS:
       display.setCursor(40, 25);
       display.println("SUCCESS");
-      display.setCursor(15, 40);
-      display.println("Enrollment complete!");
+      display.setCursor(20, 40);
+      display.println("Enrollment done!");
       break;
       
     case ENROLL_ERROR:
-      display.setCursor(45, 15);
+      display.setCursor(45, 25);
       display.println("ERROR");
-      display.setCursor(20, 30);
-      display.println("Please try again");
+      display.setCursor(20, 40);
+      display.println("Try again");
+      break;
       
-      // Show specific error if available
-      if (lastFingerprintError.length() > 0) {
-        display.setCursor(10, 45);
-        if (lastFingerprintError.length() > 16) {
-          display.print(lastFingerprintError.substring(0, 14) + "..");
-        } else {
-          display.print(lastFingerprintError);
-        }
-      }
+    default:
+      display.setCursor(30, 25);
+      display.println("READY");
       break;
   }
 }
 
 void drawWifiScanScreen() {
-  display.setCursor(45, 0);
-  display.println("WIFI");
+  display.setCursor(45, 2);
+  display.println("WIFI SCAN");
+  display.drawLine(0, 12, 127, 12, SH110X_WHITE);
+  
+  display.setCursor(5, 16);
+  display.print("Networks: ");
+  display.print(wifiNetworkCount);
   
   if (wifiScanning) {
-    display.setCursor(35, 25);
+    display.setCursor(40, 30);
     display.println("SCANNING...");
-    return;
-  }
-  
-  if (wifiNetworkCount == 0) {
-    display.setCursor(20, 20);
-    display.println("No networks");
-    display.setCursor(10, 35);
-    display.println("Press SELECT");
-    display.setCursor(25, 45);
-    display.println("to refresh");
-    return;
-  }
-  
-  int startY = 12;
-  
-  // Refresh option (always first)
-  if (wifiSelectedIndex == 0) {
-    display.fillRect(0, startY - 1, 128, 12, SH110X_WHITE);
-    display.setTextColor(SH110X_BLACK);
-  }
-  
-  display.setCursor(2, startY);
-  display.print(">>> REFRESH <<<");
-  
-  if (wifiSelectedIndex == 0) {
-    display.setTextColor(SH110X_WHITE);
-  }
-  
-  // Networks (3 at a time)
-  for (int i = 0; i < 3 && i < wifiNetworkCount; i++) {
-    int yPos = startY + 12 + (i * 12);
-    int displayIndex = i + 1;
-    
-    if (wifiSelectedIndex == displayIndex) {
-      display.fillRect(0, yPos - 1, 128, 12, SH110X_WHITE);
-      display.setTextColor(SH110X_BLACK);
-    }
-    
-    display.setCursor(2, yPos);
-    
-    String displayText = String(displayIndex) + ". " + wifiNetworks[i];
-    if (displayText.length() > 20) {
-      displayText = displayText.substring(0, 17) + "...";
-    }
-    display.print(displayText);
-    
-    if (wifiSelectedIndex == displayIndex) {
-      display.setTextColor(SH110X_WHITE);
+  } else if (wifiNetworkCount == 0) {
+    display.setCursor(25, 30);
+    display.println("NO NETWORKS");
+  } else {
+    // Display networks (showing 4 at a time)
+    int startIdx = (wifiSelectedIndex / 4) * 4;
+    for (int i = 0; i < 4 && (startIdx + i) < wifiNetworkCount; i++) {
+      int yPos = 16 + (i * 12);
+      int idx = startIdx + i;
+      
+      if (idx == wifiSelectedIndex) {
+        display.fillRect(0, yPos - 1, 128, 12, SH110X_WHITE);
+        display.setTextColor(SH110X_BLACK);
+      }
+      
+      display.setCursor(2, yPos);
+      display.print(">");
+      
+      // Display network name
+      String network = wifiNetworks[idx];
+      if (network.length() > 18) {
+        network = network.substring(0, 16) + "..";
+      }
+      display.print(network);
+      
+      if (idx == wifiSelectedIndex) {
+        display.setTextColor(SH110X_WHITE);
+      }
     }
   }
 }
@@ -1284,152 +1062,181 @@ void drawNetworkStatusScreen() {
   display.println("NETWORK STATUS");
   display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
-  wl_status_t wifiStatus = WiFi.status();
+  wl_status_t status = WiFi.status();
   
   display.setCursor(10, 20);
-  display.print("WiFi: ");
-  
-  if (wifiConnecting) {
-    display.print("Connecting...");
-  } else if (wifiStatus == WL_CONNECTED) {
-    display.print("Connected");
-  } else {
-    display.print("Disconnected");
-  }
-  
-  if (wifiStatus == WL_CONNECTED) {
-    display.setCursor(10, 30);
-    display.print("SSID: ");
-    String ssid = WiFi.SSID();
-    if (ssid.length() > 10) {
-      display.print(ssid.substring(0, 8) + "..");
-    } else {
-      display.print(ssid);
-    }
-    
-    display.setCursor(10, 40);
-    display.print("IP: ");
-    String ip = WiFi.localIP().toString();
-    if (ip.length() > 15) {
-      ip = ip.substring(0, 13) + "..";
-    }
-    display.print(ip);
-    
-    display.setCursor(10, 50);
-    display.print("RSSI: ");
-    display.print(WiFi.RSSI());
-    display.print(" dBm");
+  display.print("Status: ");
+  switch(status) {
+    case WL_CONNECTED:
+      display.println("CONNECTED");
+      display.setCursor(10, 32);
+      display.print("SSID: ");
+      display.println(WiFi.SSID());
+      display.setCursor(10, 44);
+      display.print("IP: ");
+      display.println(WiFi.localIP());
+      break;
+    case WL_NO_SHIELD:
+      display.println("NO SHIELD");
+      break;
+    case WL_IDLE_STATUS:
+      display.println("IDLE");
+      break;
+    case WL_NO_SSID_AVAIL:
+      display.println("NO SSID");
+      break;
+    case WL_SCAN_COMPLETED:
+      display.println("SCAN DONE");
+      break;
+    case WL_CONNECT_FAILED:
+      display.println("FAILED");
+      break;
+    case WL_CONNECTION_LOST:
+      display.println("LOST");
+      break;
+    case WL_DISCONNECTED:
+      display.println("DISCONNECTED");
+      break;
   }
 }
 
 void drawWifiConnectScreen() {
   display.setCursor(35, 2);
-  display.println("CONNECTING");
+  display.println("CONNECT");
   display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
-  display.setCursor(40, 25);
-  
-  if (wifiConnecting) {
-    display.print("CONNECTING");
-  } else {
-    if (WiFi.status() == WL_CONNECTED) {
-      display.print("CONNECTED");
-    } else {
-      display.print("FAILED");
-    }
+  if (wifiSelectedIndex >= wifiNetworkCount || wifiNetworkCount == 0) {
+    display.setCursor(25, 30);
+    display.println("NO NETWORK");
+    return;
   }
   
-  // Show network name
-  if (wifiSelectedIndex > 0 && wifiSelectedIndex <= wifiNetworkCount) {
-    display.setCursor(10, 40);
-    display.print("To: ");
-    String ssid = wifiNetworks[wifiSelectedIndex - 1];
+  String selectedSSID = wifiNetworks[wifiSelectedIndex];
+  int bracketPos = selectedSSID.indexOf(" [");
+  String ssidOnly = selectedSSID.substring(0, bracketPos);
+  
+  display.setCursor(5, 16);
+  display.print("SSID: ");
+  if (ssidOnly.length() > 15) {
+    display.println(ssidOnly.substring(0, 15));
+  } else {
+    display.println(ssidOnly);
+  }
+  
+  if (selectedSSID.indexOf("[OPEN]") != -1) {
+    display.setCursor(20, 32);
+    display.println("OPEN NETWORK");
+    display.setCursor(15, 45);
+    display.println("PRESS SELECT");
+  } else {
+    display.setCursor(20, 32);
+    display.println("PASSWORD:");
+    display.setCursor(15, 45);
+    display.println("ENTER PASSWORD");
+  }
+}
+
+void drawWifiStatusScreen() {
+  display.setCursor(30, 2);
+  display.println("WIFI INFO");
+  display.drawLine(0, 12, 127, 12, SH110X_WHITE);
+  
+  wl_status_t status = WiFi.status();
+  
+  if (status == WL_CONNECTED) {
+    display.setCursor(10, 20);
+    display.print("Connected to:");
+    display.setCursor(5, 30);
+    
+    String ssid = WiFi.SSID();
+    if (ssid.length() > 16) {
+      display.println(ssid.substring(0, 14) + "..");
+    } else {
+      display.println(ssid);
+    }
+    
+    display.setCursor(5, 42);
+    display.print("IP: ");
+    display.println(WiFi.localIP());
+    
+    display.setCursor(5, 54);
+    display.print("RSSI: ");
+    display.print(WiFi.RSSI());
+    display.print(" dBm");
+  } else if (wifiConnecting) {
+    display.setCursor(30, 30);
+    display.println("CONNECTING...");
+  } else {
+    display.setCursor(30, 30);
+    display.println("NOT CONNECTED");
+  }
+}
+
+void drawPasswordEntryScreen() {
+  display.setCursor(30, 2);
+  display.println("PASSWORD");
+  display.drawLine(0, 12, 127, 12, SH110X_WHITE);
+  
+  display.setCursor(5, 16);
+  display.print("SSID: ");
+  if (wifiSelectedIndex < wifiNetworkCount) {
+    String ssid = wifiNetworks[wifiSelectedIndex];
     int bracketPos = ssid.indexOf(" [");
     if (bracketPos != -1) {
       ssid = ssid.substring(0, bracketPos);
     }
     if (ssid.length() > 12) {
-      display.print(ssid.substring(0, 10) + "..");
+      display.println(ssid.substring(0, 12) + "..");
     } else {
-      display.print(ssid);
+      display.println(ssid);
     }
   }
-}
-
-void drawWifiStatusScreen() {
-  display.setCursor(45, 2);
-  display.println("WIFI");
-  display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
-  if (WiFi.status() == WL_CONNECTED) {
-    display.setCursor(25, 25);
-    display.print("Connected");
-    
-    display.setCursor(5, 35);
-    display.print("SSID: ");
-    String ssid = connectedSSID;
-    if (ssid.length() > 12) {
-      ssid = ssid.substring(0, 10) + "..";
-    }
-    display.print(ssid);
-    
-    display.setCursor(5, 45);
-    display.print("IP: ");
-    String ip = WiFi.localIP().toString();
-    if (ip.length() > 15) {
-      ip = ip.substring(0, 13) + "..";
-    }
-    display.print(ip);
-  } else {
-    display.setCursor(25, 25);
-    display.print("No Connection");
-  }
-}
-
-void drawPasswordEntryScreen() {
-  display.setCursor(35, 2);
-  display.println("PASSWORD");
-  display.drawLine(0, 12, 127, 12, SH110X_WHITE);
-  
-  // Show current character
-  display.setCursor(5, 25);
-  display.print("Char: ");
-  if (passwordCursorPos < sizeof(passwordChars) && passwordChars[passwordCursorPos] != 0) {
-    display.print(passwordChars[passwordCursorPos]);
-  } else {
-    display.print("a");
-  }
-  
-  // Show password field
-  display.setCursor(5, 40);
+  // Show entered password
+  display.setCursor(5, 30);
   display.print("Pass: ");
-  for (int i = 0; i < passwordCursorPos; i++) {
-    if (passwordChars[i] != 0) {
+  if (passwordCursorPos > 0) {
+    for (int i = 0; i < passwordCursorPos; i++) {
       display.print("*");
     }
+  } else {
+    display.print("<enter>");
   }
   
-  // Cursor
+  // Show cursor
   display.setCursor(5 + (passwordCursorPos * 6), 40);
   display.print("_");
+  
+  // Show current character
+  display.setCursor(50, 50);
+  display.print("Char: ");
+  if (passwordCursorPos < 63) {
+    display.print(passwordChars[passwordCursorPos]);
+  } else {
+    display.print("MAX");
+  }
 }
 
 void drawAboutScreen() {
-  display.setCursor(50, 2);
+  display.setCursor(45, 2);
   display.println("ABOUT");
   display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
-  display.setCursor(10, 20);
-  display.println("Smart Enroll v3.1");
-  display.setCursor(10, 30);
-  display.println("Fixed Enrollment");
-  display.setCursor(10, 40);
-  display.println("ESP32 + R307");
-  display.setCursor(10, 50);
-  display.println("IoT System");
+  display.setCursor(20, 20);
+  display.println("SMART ENROLL");
+  display.setCursor(35, 30);
+  display.println("SYSTEM v3.2");
+  
+  display.setCursor(5, 45);
+  display.print("Sensor: ");
+  display.print(fingerprintInitialized ? "OK" : "ERR");
+  
+  display.setCursor(5, 55);
+  display.print("WiFi: ");
+  display.print(WiFi.status() == WL_CONNECTED ? "ON" : "OFF");
 }
 
-// =================== BUTTON HANDLING ===================
+// =================== BUTTON HANDLING - OPTIMIZED ===================
 void checkButtons() {
   static bool lastUp = HIGH, lastDown = HIGH, lastSel = HIGH, lastBack = HIGH;
   
@@ -1438,25 +1245,26 @@ void checkButtons() {
   bool selNow = digitalRead(BUTTON_SELECT);
   bool backNow = digitalRead(BUTTON_BACK);
   
-  bool buttonStates[4] = {upNow == LOW, downNow == LOW, selNow == LOW, backNow == LOW};
-  unsigned long now = millis();
+  // Quick button press detection
+  if (upNow == LOW && lastUp == HIGH) handleButtonPress(0);
+  if (downNow == LOW && lastDown == HIGH) handleButtonPress(1);
+  if (selNow == LOW && lastSel == HIGH) handleButtonPress(2);
+  if (backNow == LOW && lastBack == HIGH) handleButtonPress(3);
+  
+  // Long press detection (simplified)
+  static unsigned long pressStart[4] = {0, 0, 0, 0};
+  bool buttons[4] = {upNow == LOW, downNow == LOW, selNow == LOW, backNow == LOW};
   
   for (int i = 0; i < 4; i++) {
-    if (buttonStates[i]) {
-      if (buttonPressTime[i] == 0) {
-        buttonPressTime[i] = now;
-      } else if (now - buttonPressTime[i] > 1000 && !buttonLongPressed[i]) {
+    if (buttons[i]) {
+      if (pressStart[i] == 0) pressStart[i] = millis();
+      else if (millis() - pressStart[i] > 800 && !buttonLongPressed[i]) {
         buttonLongPressed[i] = true;
         handleLongPress(i);
       }
     } else {
-      if (buttonPressTime[i] > 0) {
-        if (!buttonLongPressed[i]) {
-          handleButtonPress(i);
-        }
-        buttonPressTime[i] = 0;
-        buttonLongPressed[i] = false;
-      }
+      pressStart[i] = 0;
+      buttonLongPressed[i] = false;
     }
   }
   
@@ -1467,7 +1275,6 @@ void checkButtons() {
 }
 
 void handleLongPress(int button) {
-  // Long press SELECT on password entry to connect
   if (currentScreen == SCREEN_PASSWORD_ENTRY && button == 2) {
     String password = "";
     for (int i = 0; i < passwordCursorPos; i++) {
@@ -1475,29 +1282,13 @@ void handleLongPress(int button) {
     }
     
     currentScreen = SCREEN_WIFI_CONNECT;
-    connectToWiFi(wifiNetworks[wifiSelectedIndex - 1], password);
+    connectToWiFi(wifiNetworks[wifiSelectedIndex], password);
     
     memset(passwordChars, 0, sizeof(passwordChars));
     passwordCursorPos = 0;
     needRefresh = true;
   } 
-  // Long press SELECT on WiFi screen to connect to open network
-  else if (currentScreen == SCREEN_WIFI_SCAN && button == 2 && !wifiScanning && wifiSelectedIndex > 0) {
-    String selectedNetwork = wifiNetworks[wifiSelectedIndex - 1];
-    
-    if (selectedNetwork.indexOf("[OPEN]") != -1) {
-      currentScreen = SCREEN_WIFI_CONNECT;
-      connectToWiFi(selectedNetwork, "");
-    } else {
-      currentScreen = SCREEN_PASSWORD_ENTRY;
-      passwordCursorPos = 0;
-      memset(passwordChars, 0, sizeof(passwordChars));
-      passwordChars[0] = 'a';
-    }
-  }
-  // Long press SELECT in enrollment to cancel
-  else if (currentScreen == SCREEN_ENROLL_MODE && button == 2 && 
-           (enrollState == ENROLL_CAPTURING || enrollState == ENROLL_PENDING)) {
+  else if (currentScreen == SCREEN_ENROLL_MODE && button == 2 && enrollState == ENROLL_CAPTURING) {
     resetEnrollmentState();
     showNotificationMsg("Cancelled");
   }
@@ -1515,31 +1306,16 @@ void handleButtonPress(int button) {
       break;
       
     case SCREEN_MAIN_MENU:
-      if (button == 0) {
-        menuIndex = (menuIndex > 0) ? menuIndex - 1 : 3;
-      } else if (button == 1) {
-        menuIndex = (menuIndex < 3) ? menuIndex + 1 : 0;
-      } else if (button == 2) {
+      if (button == 0) menuIndex = (menuIndex > 0) ? menuIndex - 1 : 3;
+      else if (button == 1) menuIndex = (menuIndex < 3) ? menuIndex + 1 : 0;
+      else if (button == 2) {
         switch(menuIndex) {
-          case 0: 
-            currentScreen = SCREEN_ENROLL_MODE;
-            resetEnrollmentState();
-            break;
-          case 1: 
-            currentScreen = SCREEN_WIFI_SCAN;
-            wifiSelectedIndex = 0;
-            scanWiFiNetworks();
-            break;
-          case 2: 
-            currentScreen = SCREEN_NETWORK_STATUS;
-            break;
-          case 3: 
-            currentScreen = SCREEN_ABOUT;
-            break;
+          case 0: currentScreen = SCREEN_ENROLL_MODE; resetEnrollmentState(); break;
+          case 1: currentScreen = SCREEN_WIFI_SCAN; wifiSelectedIndex = 0; scanWiFiNetworks(); break;
+          case 2: currentScreen = SCREEN_NETWORK_STATUS; break;
+          case 3: currentScreen = SCREEN_ABOUT; break;
         }
-      } else if (button == 3) {
-        currentScreen = SCREEN_HOME;
-      }
+      } else if (button == 3) currentScreen = SCREEN_HOME;
       break;
       
     case SCREEN_ENROLL_MODE:
@@ -1549,11 +1325,10 @@ void handleButtonPress(int button) {
           fpState = FP_IDLE;
           studentInProgress = true;
           enrollmentStartTime = millis();
-          showNotificationMsg("Start enrollment");
+          showNotificationMsg("Start!");
         } else if (enrollState == ENROLL_ERROR) {
-          // Retry enrollment
           enrollState = ENROLL_PENDING;
-          showNotificationMsg("Retrying...");
+          showNotificationMsg("Retry");
         }
       } else if (button == 3) {
         resetEnrollmentState();
@@ -1562,86 +1337,80 @@ void handleButtonPress(int button) {
       break;
       
     case SCREEN_WIFI_SCAN:
-      if (!wifiScanning) {
-        if (button == 0) {
-          wifiSelectedIndex = (wifiSelectedIndex > 0) ? wifiSelectedIndex - 1 : wifiNetworkCount;
-        } else if (button == 1) {
-          wifiSelectedIndex = (wifiSelectedIndex < wifiNetworkCount) ? wifiSelectedIndex + 1 : 0;
-        } else if (button == 2) {
-          if (wifiSelectedIndex == 0) {
-            manualRefreshWiFi();
-          } else if (wifiSelectedIndex > 0) {
-            String selectedNetwork = wifiNetworks[wifiSelectedIndex - 1];
-            
-            if (selectedNetwork.indexOf("[OPEN]") != -1) {
-              currentScreen = SCREEN_WIFI_CONNECT;
-              connectToWiFi(selectedNetwork, "");
-            } else {
-              currentScreen = SCREEN_PASSWORD_ENTRY;
-              passwordCursorPos = 0;
-              memset(passwordChars, 0, sizeof(passwordChars));
-              passwordChars[0] = 'a';
-            }
+      if (button == 0) wifiSelectedIndex = (wifiSelectedIndex > 0) ? wifiSelectedIndex - 1 : wifiNetworkCount - 1;
+      else if (button == 1) wifiSelectedIndex = (wifiSelectedIndex < wifiNetworkCount - 1) ? wifiSelectedIndex + 1 : 0;
+      else if (button == 2) {
+        if (wifiNetworkCount > 0 && wifiSelectedIndex < wifiNetworkCount) {
+          String selectedSSID = wifiNetworks[wifiSelectedIndex];
+          if (selectedSSID.indexOf("[OPEN]") != -1) {
+            // Open network
+            connectToWiFi(selectedSSID, "");
+            currentScreen = SCREEN_WIFI_STATUS;
+          } else {
+            // Password required
+            currentScreen = SCREEN_PASSWORD_ENTRY;
+            memset(passwordChars, 0, sizeof(passwordChars));
+            passwordCursorPos = 0;
+            passwordChars[0] = charSet[0];
           }
-        } else if (button == 3) {
-          currentScreen = SCREEN_MAIN_MENU;
         }
+      } else if (button == 3) {
+        currentScreen = SCREEN_MAIN_MENU;
+        wifiSelectedIndex = 0;
       }
       break;
       
     case SCREEN_PASSWORD_ENTRY:
       if (button == 0) {
-        if (passwordCursorPos < sizeof(passwordChars)) {
-          char currentChar = passwordChars[passwordCursorPos];
-          int charIndex = 0;
-          
+        // Next character
+        if (passwordCursorPos < 62) {
           for (int i = 0; i < charSetLength; i++) {
-            if (charSet[i] == currentChar) {
-              charIndex = i;
+            if (passwordChars[passwordCursorPos] == charSet[i]) {
+              passwordChars[passwordCursorPos] = charSet[(i + 1) % charSetLength];
               break;
             }
           }
-          
-          charIndex = (charIndex + 1) % charSetLength;
-          passwordChars[passwordCursorPos] = charSet[charIndex];
         }
       } else if (button == 1) {
-        if (passwordCursorPos < sizeof(passwordChars)) {
-          char currentChar = passwordChars[passwordCursorPos];
-          int charIndex = 0;
-          
+        // Previous character
+        if (passwordCursorPos < 62) {
           for (int i = 0; i < charSetLength; i++) {
-            if (charSet[i] == currentChar) {
-              charIndex = i;
+            if (passwordChars[passwordCursorPos] == charSet[i]) {
+              passwordChars[passwordCursorPos] = charSet[(i - 1 + charSetLength) % charSetLength];
               break;
             }
           }
-          
-          charIndex = (charIndex - 1 + charSetLength) % charSetLength;
-          passwordChars[passwordCursorPos] = charSet[charIndex];
         }
       } else if (button == 2) {
-        if (passwordCursorPos < sizeof(passwordChars) - 1) {
+        // Move to next position or confirm
+        if (passwordCursorPos < 62) {
           passwordCursorPos++;
           if (passwordChars[passwordCursorPos] == 0) {
-            passwordChars[passwordCursorPos] = 'a';
+            passwordChars[passwordCursorPos] = charSet[0];
           }
         }
       } else if (button == 3) {
+        // Back or cancel
         if (passwordCursorPos > 0) {
           passwordCursorPos--;
-          passwordChars[passwordCursorPos + 1] = 0;
         } else {
-          memset(passwordChars, 0, sizeof(passwordChars));
-          passwordCursorPos = 0;
           currentScreen = SCREEN_WIFI_SCAN;
         }
       }
       break;
       
-    case SCREEN_WIFI_CONNECT:
     case SCREEN_WIFI_STATUS:
+      if (button == 3) {
+        currentScreen = SCREEN_MAIN_MENU;
+      }
+      break;
+      
     case SCREEN_NETWORK_STATUS:
+      if (button == 3) {
+        currentScreen = SCREEN_MAIN_MENU;
+      }
+      break;
+      
     case SCREEN_ABOUT:
       if (button == 3) {
         currentScreen = SCREEN_MAIN_MENU;
@@ -1649,9 +1418,6 @@ void handleButtonPress(int button) {
       break;
       
     default:
-      if (button == 3) {
-        currentScreen = SCREEN_MAIN_MENU;
-      }
       break;
   }
 }
