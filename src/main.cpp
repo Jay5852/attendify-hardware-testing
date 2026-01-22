@@ -816,7 +816,7 @@ void drawFooter() {
       
     case SCREEN_ENROLL_MODE:
       if (enrollState == ENROLL_PENDING) {
-        display.setCursor(35, 53);  // CHANGED: Was 56, moved up 3 pixels
+        display.setCursor(35, 56);  // Changed back to original position
         display.print("SEL=START");
       } else if (enrollState == ENROLL_CAPTURING) {
         display.setCursor(45, 56);
@@ -968,8 +968,7 @@ void drawEnrollmentScreen() {
         display.print(pendingStudentName);
       }
       
-      display.setCursor(20, 49);  // CHANGED: Was 50, moved up 1 pixel
-      display.print("Press SELECT");
+      // Removed: "Press SELECT" text
       break;
       
     case ENROLL_CAPTURING:
@@ -1250,11 +1249,11 @@ void drawAboutScreen() {
   display.setCursor(35, 35);
   display.println("SYSTEM v3.2");
   
-  display.setCursor(5, 48);  // CHANGED: Was 50, moved up 2 pixels
+  display.setCursor(5, 50);
   display.print("Sensor: ");
   display.print(fingerprintInitialized ? "OK" : "ERR");
   
-  display.setCursor(70, 48);  // CHANGED: Was 50, moved up 2 pixels
+  display.setCursor(70, 50);
   display.print("WiFi: ");
   display.print(WiFi.status() == WL_CONNECTED ? "ON" : "OFF");
 }
