@@ -96,6 +96,8 @@ int wifiSelectedIndex = 0;
 bool wifiScanning = false;
 bool wifiConnecting = false;
 String connectedSSID = "";
+unsigned long wifiConnectionStartTime = 0;
+const unsigned long WIFI_CONNECTION_TIMEOUT = 20000; // 20 seconds timeout
 
 // Password entry
 String wifiPassword = "";
@@ -155,6 +157,7 @@ void handleLongPress(int button);
 void scanWiFiNetworks();
 void connectToWiFi(String ssid, String password);
 void checkWifiStatusChange();
+void updateWiFiConnection();
 void showNotificationMsg(String message);
 void clearNotification();
 void manualRefreshWiFi();
@@ -207,6 +210,16 @@ void setup() {
 // =================== INITIALIZE PREFERENCES ===================
 void initializePreferences() {
   preferences.begin("enroll_system", false);
+  
+  // Load saved WiFi credentials
+  String savedSSID = preferences.getString("wifi_ssid", "");
+  String savedPassword = preferences.getString("wifi_pass", "");
+  
+  if (savedSSID.length() > 0) {
+    Serial.print("Found saved WiFi: ");
+    Serial.println(savedSSID);
+    WiFi.begin(savedSSID.c_str(), savedPassword.c_str());
+  }
 }
 
 // =================== INITIALIZE HARDWARE ===================
@@ -244,19 +257,22 @@ void initializeHardware() {
   pinMode(BUTTON_BACK, INPUT_PULLUP);
   Serial.println("✅ Buttons initialized");
   
-  // Initialize Fingerprint Sensor
+  // Initialize Fingerprint Sensor (ONCE - NOT every time enroll mode is entered)
   Serial.println("Initializing fingerprint sensor...");
   fingerSerial.begin(57600, SERIAL_8N1, FINGERPRINT_RX, FINGERPRINT_TX);
   delay(1000);
   
-  for (int attempt = 1; attempt <= 2; attempt++) {
+  for (int attempt = 1; attempt <= 3; attempt++) {
     Serial.print("Fingerprint sensor attempt ");
     Serial.print(attempt);
-    Serial.print("/2... ");
+    Serial.print("/3... ");
     
     if (finger.verifyPassword()) {
       fingerprintInitialized = true;
       Serial.println("✅ SUCCESS");
+      
+      // Disable sensor LED when idle to prevent blinking
+      finger.LEDcontrol(false);
       
       int templateCount = finger.getTemplateCount();
       Serial.print("Templates: ");
@@ -275,8 +291,9 @@ void initializeHardware() {
   
   // Initialize WiFi
   WiFi.mode(WIFI_STA);
-  WiFi.disconnect();
-  delay(50);
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(true);
+  Serial.println("✅ WiFi initialized");
   
   Serial.println("✅ Hardware initialization complete");
 }
@@ -284,6 +301,11 @@ void initializeHardware() {
 // =================== MAIN LOOP ===================
 void loop() {
   checkButtons();
+  
+  // Update WiFi connection status if connecting
+  if (wifiConnecting) {
+    updateWiFiConnection();
+  }
   
   if (currentScreen == SCREEN_ENROLL_MODE && 
       enrollState == ENROLL_IDLE && 
@@ -322,13 +344,47 @@ void loop() {
   delay(20);
 }
 
-// =================== WIFI FUNCTIONS ===================
+// =================== WIFI FUNCTIONS - FIXED ===================
 void checkWifiStatusChange() {
   wl_status_t currentStatus = WiFi.status();
   
   if (currentStatus != lastWifiStatus) {
     needRefresh = true;
     lastWifiStatus = currentStatus;
+    
+    // Update connected SSID when status changes
+    if (currentStatus == WL_CONNECTED && connectedSSID.length() == 0) {
+      connectedSSID = WiFi.SSID();
+    } else if (currentStatus != WL_CONNECTED) {
+      connectedSSID = "";
+    }
+  }
+}
+
+void updateWiFiConnection() {
+  if (!wifiConnecting) return;
+  
+  wl_status_t status = WiFi.status();
+  
+  if (status == WL_CONNECTED) {
+    wifiConnecting = false;
+    connectedSSID = WiFi.SSID();
+    needRefresh = true;
+    showNotificationMsg("Connected!");
+    
+    // Save successful credentials
+    preferences.putString("wifi_ssid", connectedSSID);
+    preferences.putString("wifi_pass", wifiPassword);
+    
+    Serial.print("Connected to: ");
+    Serial.println(connectedSSID);
+  }
+  else if (millis() - wifiConnectionStartTime > WIFI_CONNECTION_TIMEOUT) {
+    wifiConnecting = false;
+    needRefresh = true;
+    showNotificationMsg("Failed");
+    
+    Serial.println("WiFi connection timeout");
   }
 }
 
@@ -370,7 +426,7 @@ void scanWiFiNetworks() {
   
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
-  delay(50);
+  delay(100);
   
   showNotificationMsg("Scanning...");
   
@@ -418,40 +474,33 @@ void scanWiFiNetworks() {
 }
 
 void connectToWiFi(String ssid, String password) {
+  // Extract SSID name from display string (remove security info)
+  int bracketPos = ssid.indexOf(" [");
+  String ssidOnly = ssid;
+  if (bracketPos != -1) {
+    ssidOnly = ssid.substring(0, bracketPos);
+  }
+  
   connectedSSID = "";
   wifiConnecting = true;
+  wifiConnectionStartTime = millis();
+  wifiPassword = password;
   needRefresh = true;
-  
-  int bracketPos = ssid.indexOf(" [");
-  if (bracketPos != -1) {
-    ssid = ssid.substring(0, bracketPos);
-  }
   
   showNotificationMsg("Connecting...");
   
-  WiFi.begin(ssid.c_str(), password.c_str());
+  Serial.print("Connecting to: ");
+  Serial.println(ssidOnly);
   
-  int attempts = 0;
-  while (attempts < 15) {
-    if (WiFi.status() == WL_CONNECTED) {
-      connectedSSID = ssid;
-      wifiConnecting = false;
-      needRefresh = true;
-      showNotificationMsg("Connected!");
-      break;
-    }
-    delay(300);
-    attempts++;
-  }
+  // Stop any existing connection
+  WiFi.disconnect();
+  delay(100);
   
-  if (WiFi.status() != WL_CONNECTED) {
-    wifiConnecting = false;
-    needRefresh = true;
-    showNotificationMsg("Failed");
-  }
+  // Start new connection
+  WiFi.begin(ssidOnly.c_str(), password.c_str());
 }
 
-// =================== ENROLLMENT FUNCTIONS ===================
+// =================== ENROLLMENT FUNCTIONS - FIXED FINGERPRINT BLINKING ===================
 void pollServerForEnrollment() {
   if (WiFi.status() != WL_CONNECTED) {
     showNotificationMsg("No WiFi");
@@ -499,7 +548,7 @@ void pollServerForEnrollment() {
   http.end();
 }
 
-// =================== OPTIMIZED FINGERPRINT ENROLLMENT ===================
+// =================== OPTIMIZED FINGERPRINT ENROLLMENT - FIXED BLINKING ===================
 void handleFingerprintEnrollmentFast() {
   static unsigned long stateStartTime = 0;
   static int result;
@@ -510,27 +559,48 @@ void handleFingerprintEnrollmentFast() {
     firstCaptureDone = false;
     secondCaptureDone = false;
     Serial.println("Starting FAST enrollment...");
+    
+    // Turn on LED only when starting enrollment
+    if (fingerprintInitialized) {
+      finger.LEDcontrol(1); // Turn on LED for enrollment
+    }
+    
     fpState = FP_WAIT_FOR_FIRST;
     showNotificationMsg("Place finger");
   }
   
+  // Check for overall timeout
   if (millis() - fpStateStartTime > 20000) {
     Serial.println("Enrollment timeout");
     showNotificationMsg("Too slow");
+    
+    // Turn off LED on timeout
+    if (fingerprintInitialized) {
+      finger.LEDcontrol(false);
+    }
+    
     resetFingerprintState();
     enrollState = ENROLL_ERROR;
+    studentInProgress = false;
+    needRefresh = true;
     return;
   }
   
   switch(fpState) {
     case FP_WAIT_FOR_FIRST:
-      if (millis() - stateStartTime > 200) {
+      if (millis() - stateStartTime > 500) { // Increased from 200ms to reduce blinking
         result = finger.getImage();
         
         if (result == FINGERPRINT_OK) {
           Serial.println("First capture");
           fpState = FP_CAPTURE_FIRST;
           showNotificationMsg("Hold...");
+        }
+        // Check for timeout in waiting for finger
+        else if (millis() - fpStateStartTime > 10000) {
+          Serial.println("Timeout waiting for finger");
+          showNotificationMsg("No finger");
+          fpState = FP_FAILED;
         }
         stateStartTime = millis();
       }
@@ -554,7 +624,7 @@ void handleFingerprintEnrollmentFast() {
       break;
       
     case FP_WAIT_FOR_REMOVAL:
-      if (millis() - stateStartTime > 200) {
+      if (millis() - stateStartTime > 500) { // Increased from 200ms
         result = finger.getImage();
         
         if (result == FINGERPRINT_NOFINGER) {
@@ -565,19 +635,31 @@ void handleFingerprintEnrollmentFast() {
           stateStartTime = millis();
         } else if (result == FINGERPRINT_OK) {
           showNotificationMsg("Lift now!");
+          // Check if finger has been there too long
+          if (millis() - stateStartTime > 5000) {
+            Serial.println("Finger not lifted");
+            showNotificationMsg("Remove finger");
+            fpState = FP_FAILED;
+          }
         }
         stateStartTime = millis();
       }
       break;
       
     case FP_WAIT_FOR_SECOND:
-      if (millis() - stateStartTime > 200) {
+      if (millis() - stateStartTime > 500) { // Increased from 200ms
         result = finger.getImage();
         
         if (result == FINGERPRINT_OK) {
           Serial.println("Second capture");
           fpState = FP_CAPTURE_SECOND;
           showNotificationMsg("Hold...");
+        }
+        // Check for timeout waiting for second finger
+        else if (millis() - stateStartTime > 8000) {
+          Serial.println("Timeout waiting for 2nd finger");
+          showNotificationMsg("Too slow");
+          fpState = FP_FAILED;
         }
         stateStartTime = millis();
       }
@@ -612,6 +694,12 @@ void handleFingerprintEnrollmentFast() {
         if (result == FINGERPRINT_OK) {
           Serial.print("Stored ID: ");
           Serial.println(pendingStudentRoll);
+          
+          // Turn off LED after successful enrollment
+          if (fingerprintInitialized) {
+            finger.LEDcontrol(false);
+          }
+          
           fpState = FP_COMPLETE;
           enrollState = ENROLL_UPLOADING;
           sendEnrollmentConfirmation(pendingStudentRoll, pendingStudentRoll);
@@ -637,9 +725,39 @@ void handleFingerprintEnrollmentFast() {
       break;
       
     case FP_FAILED:
-      delay(1000);
+      Serial.println("Fingerprint enrollment failed - resetting");
+      
+      // Turn off LED on failure
+      if (fingerprintInitialized) {
+        finger.LEDcontrol(false);
+      }
+      
+      // Reset both states properly
+      resetFingerprintState();
+      
+      // Clear any pending finger detection
+      for (int i = 0; i < 3; i++) {
+        finger.getImage(); // Clear any pending image
+        delay(100);
+      }
+      
+      // Set error state
+      enrollState = ENROLL_ERROR;
+      studentInProgress = false;
+      enrollmentStartTime = 0;
+      
+      // Ensure we refresh the display
+      needRefresh = true;
+      
+      // Show error notification
+      showNotificationMsg("Failed - Press SEL");
+      
+      return;
+      
+    default:
       resetFingerprintState();
       enrollState = ENROLL_ERROR;
+      studentInProgress = false;
       needRefresh = true;
       break;
   }
@@ -699,7 +817,7 @@ void sendEnrollmentConfirmation(int rollNo, int fingerprintId) {
   
   if (httpCode == 200) {
     enrollState = ENROLL_SUCCESS;
-    showNotificationMsg("Success!");
+    showNotificationMsg("✅ Success!");
     
     delay(1000);
     resetEnrollmentState();
@@ -718,7 +836,15 @@ void resetEnrollmentState() {
   enrollmentStartTime = 0;
   enrollmentRetryCount = 0;
   fpRetryCount = 0;
+  firstCaptureDone = false;
+  secondCaptureDone = false;
   needRefresh = true;
+  
+  // Clear any pending sensor state
+  if (fingerprintInitialized) {
+    finger.getImage(); // Clear sensor buffer
+    finger.LEDcontrol(false); // Ensure LED is off when idle
+  }
   
   delay(500);
   pendingStudentName = "";
@@ -728,6 +854,14 @@ void resetEnrollmentState() {
 void resetFingerprintState() {
   fpState = FP_IDLE;
   fpRetryCount = 0;
+  firstCaptureDone = false;
+  secondCaptureDone = false;
+  
+  // Ensure we're not stuck with any finger detection
+  if (fingerprintInitialized) {
+    finger.getImage(); // Clear sensor buffer
+    finger.LEDcontrol(false); // Turn off LED
+  }
 }
 
 // =================== DISPLAY FUNCTIONS - FIXED UI ===================
@@ -815,8 +949,8 @@ void drawFooter() {
       break;
       
     case SCREEN_ENROLL_MODE:
-      if (enrollState == ENROLL_PENDING) {
-        display.setCursor(35, 56);  // Changed back to original position
+      if (enrollState == ENROLL_PENDING || enrollState == ENROLL_ERROR) {
+        display.setCursor(35, 56);
         display.print("SEL=START");
       } else if (enrollState == ENROLL_CAPTURING) {
         display.setCursor(45, 56);
@@ -967,8 +1101,6 @@ void drawEnrollmentScreen() {
       } else {
         display.print(pendingStudentName);
       }
-      
-      // Removed: "Press SELECT" text
       break;
       
     case ENROLL_CAPTURING:
@@ -1006,10 +1138,23 @@ void drawEnrollmentScreen() {
       break;
       
     case ENROLL_ERROR:
-      display.setCursor(45, 25);
-      display.println("ERROR");
-      display.setCursor(20, 40);
-      display.println("Try again");
+      display.setCursor(35, 15);
+      display.println("STUDENT");
+      
+      display.setCursor(5, 30);
+      display.print("Roll: ");
+      display.print(pendingStudentRoll);
+      
+      display.setCursor(5, 40);
+      display.print("Name: ");
+      if (pendingStudentName.length() > 10) {
+        display.print(pendingStudentName.substring(0, 8) + "..");
+      } else {
+        display.print(pendingStudentName);
+      }
+      
+      display.setCursor(20, 50);
+      display.print("Press SELECT");
       break;
       
     default:
