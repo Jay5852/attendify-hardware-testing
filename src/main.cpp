@@ -2,6 +2,7 @@
  * ESP32 SMART ENROLL SYSTEM - OPTIMIZED ENROLLMENT
  * Fastest possible fingerprint enrollment for R307 sensor
  * Version: 3.2 Fast Enroll
+ * OLED UI FIXES APPLIED
  */
 
 #include <Wire.h>
@@ -144,6 +145,11 @@ const char* dayNames[7] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
 const char* monthNames[12] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN", 
                               "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
 
+// UI State Tracking - ADDED FOR FIXES
+ScreenState lastScreen = SCREEN_BOOT;
+int lastMenuIndex = -1;
+bool screenChanged = false;
+
 // =================== FUNCTION DECLARATIONS ===================
 void initializeHardware();
 void initializePreferences();
@@ -167,17 +173,17 @@ void resetEnrollmentState();
 void resetFingerprintState();
 void showDetailedError(int errorCode);
 
-// Screen drawing functions
-void drawBootScreen();
-void drawHomeScreen();
-void drawMainMenu();
-void drawEnrollmentScreen();
-void drawWifiScanScreen();
-void drawNetworkStatusScreen();
-void drawWifiConnectScreen();
-void drawWifiStatusScreen();
-void drawPasswordEntryScreen();
-void drawAboutScreen();
+// Screen drawing functions - UPDATED SIGNATURES
+void drawBootScreen(bool forceRedraw);
+void drawHomeScreen(bool forceRedraw);
+void drawMainMenu(bool forceRedraw);
+void drawEnrollmentScreen(bool forceRedraw);
+void drawWifiScanScreen(bool forceRedraw);
+void drawNetworkStatusScreen(bool forceRedraw);
+void drawWifiConnectScreen(bool forceRedraw);
+void drawWifiStatusScreen(bool forceRedraw);
+void drawPasswordEntryScreen(bool forceRedraw);
+void drawAboutScreen(bool forceRedraw);
 
 // =================== SETUP ===================
 void setup() {
@@ -193,11 +199,14 @@ void setup() {
   initializePreferences();
   
   currentScreen = SCREEN_BOOT;
+  lastScreen = SCREEN_BOOT;
   showScreen();
   delay(1500); // Shorter boot delay
   
   currentScreen = SCREEN_HOME;
+  lastScreen = SCREEN_HOME;
   needRefresh = true;
+  screenChanged = true;
   
   lastWifiStatus = WiFi.status();
   
@@ -221,9 +230,17 @@ void initializeHardware() {
   } else {
     displayInitialized = true;
     display.clearDisplay();
+    display.display(); // Force clear on hardware
     display.setTextSize(1);
     display.setTextColor(SH110X_WHITE);
     display.setRotation(0);
+    
+    // Set contrast to reduce ghosting
+    display.setContrast(0x7F);
+    
+    // Disable invert mode if accidentally set
+    display.invertDisplay(false);
+    
     Serial.println("✅ OLED initialized");
   }
   
@@ -287,6 +304,19 @@ void initializeHardware() {
 void loop() {
   checkButtons();
   
+  // Check for screen changes
+  if (currentScreen != lastScreen) {
+    screenChanged = true;
+    lastScreen = currentScreen;
+    needRefresh = true;
+    
+    // Force a complete redraw when changing screens
+    if (displayInitialized) {
+      display.clearDisplay();
+      display.display(); // Hardware clear
+    }
+  }
+  
   // Poll server if in enrollment mode, idle, and not currently processing
   if (currentScreen == SCREEN_ENROLL_MODE && 
       enrollState == ENROLL_IDLE && 
@@ -325,6 +355,7 @@ void loop() {
     showScreen();
     lastUpdate = millis();
     needRefresh = false;
+    screenChanged = false;
   }
   
   delay(20); // Much faster loop for responsiveness
@@ -372,6 +403,7 @@ void scanWiFiNetworks() {
   wifiScanning = true;
   wifiNetworkCount = 0;
   needRefresh = true;
+  screenChanged = true;
   
   for (int i = 0; i < 20; i++) {
     wifiNetworks[i] = "";
@@ -430,6 +462,7 @@ void connectToWiFi(String ssid, String password) {
   connectedSSID = "";
   wifiConnecting = true;
   needRefresh = true;
+  screenChanged = true;
   
   int bracketPos = ssid.indexOf(" [");
   if (bracketPos != -1) {
@@ -446,6 +479,7 @@ void connectToWiFi(String ssid, String password) {
       connectedSSID = ssid;
       wifiConnecting = false;
       needRefresh = true;
+      screenChanged = true;
       showNotificationMsg("Connected!");
       break;
     }
@@ -456,6 +490,7 @@ void connectToWiFi(String ssid, String password) {
   if (WiFi.status() != WL_CONNECTED) {
     wifiConnecting = false;
     needRefresh = true;
+    screenChanged = true;
     showNotificationMsg("Failed");
   }
 }
@@ -494,6 +529,7 @@ void pollServerForEnrollment() {
         enrollState = ENROLL_PENDING;
         studentInProgress = false;
         needRefresh = true;
+        screenChanged = true;
         
         showNotificationMsg("Ready!");
       }
@@ -501,6 +537,7 @@ void pollServerForEnrollment() {
       if (enrollState != ENROLL_IDLE) {
         enrollState = ENROLL_IDLE;
         needRefresh = true;
+        screenChanged = true;
       }
     }
   }
@@ -659,6 +696,7 @@ void handleFingerprintEnrollmentFast() {
       resetFingerprintState();
       enrollState = ENROLL_ERROR;
       needRefresh = true;
+      screenChanged = true;
       break;
   }
 }
@@ -739,6 +777,7 @@ void resetEnrollmentState() {
   enrollmentRetryCount = 0;
   fpRetryCount = 0;
   needRefresh = true;
+  screenChanged = true;
   
   // Quick clear
   delay(500);
@@ -751,42 +790,43 @@ void resetFingerprintState() {
   fpRetryCount = 0;
 }
 
-// =================== DISPLAY FUNCTIONS - OPTIMIZED ===================
+// =================== DISPLAY FUNCTIONS - FIXED ===================
 void showScreen() {
   if (!displayInitialized) return;
   
+  // Clear the entire display buffer
   display.clearDisplay();
   
   switch(currentScreen) {
     case SCREEN_BOOT:
-      drawBootScreen();
+      drawBootScreen(screenChanged);
       break;
     case SCREEN_HOME:
-      drawHomeScreen();
+      drawHomeScreen(screenChanged);
       break;
     case SCREEN_MAIN_MENU:
-      drawMainMenu();
+      drawMainMenu(screenChanged);
       break;
     case SCREEN_ENROLL_MODE:
-      drawEnrollmentScreen();
+      drawEnrollmentScreen(screenChanged);
       break;
     case SCREEN_WIFI_SCAN:
-      drawWifiScanScreen();
+      drawWifiScanScreen(screenChanged);
       break;
     case SCREEN_NETWORK_STATUS:
-      drawNetworkStatusScreen();
+      drawNetworkStatusScreen(screenChanged);
       break;
     case SCREEN_WIFI_CONNECT:
-      drawWifiConnectScreen();
+      drawWifiConnectScreen(screenChanged);
       break;
     case SCREEN_WIFI_STATUS:
-      drawWifiStatusScreen();
+      drawWifiStatusScreen(screenChanged);
       break;
     case SCREEN_PASSWORD_ENTRY:
-      drawPasswordEntryScreen();
+      drawPasswordEntryScreen(screenChanged);
       break;
     case SCREEN_ABOUT:
-      drawAboutScreen();
+      drawAboutScreen(screenChanged);
       break;
   }
   
@@ -794,6 +834,8 @@ void showScreen() {
   
   // Notification
   if (notificationActive && notificationMessage.length() > 0) {
+    // Clear notification area completely
+    display.fillRect(0, 50, 128, 14, SH110X_BLACK);
     display.fillRect(0, 50, 128, 14, SH110X_WHITE);
     display.setTextColor(SH110X_BLACK);
     display.setCursor(4, 52);
@@ -811,6 +853,9 @@ void showScreen() {
 void drawFooter() {
   display.setTextSize(1);
   display.setTextColor(SH110X_WHITE);
+  
+  // Clear footer area first (bottom 8 pixels)
+  display.fillRect(0, 56, 128, 8, SH110X_BLACK);
   
   switch(currentScreen) {
     case SCREEN_HOME:
@@ -849,7 +894,7 @@ void drawFooter() {
   }
 }
 
-void drawBootScreen() {
+void drawBootScreen(bool forceRedraw) {
   display.setCursor(25, 15);
   display.setTextSize(2);
   display.println("SMART");
@@ -860,9 +905,17 @@ void drawBootScreen() {
   display.print("v3.2 FAST");
 }
 
-void drawHomeScreen() {
+void drawHomeScreen(bool forceRedraw) {
+  // Clear previous content by drawing background
+  if (forceRedraw) {
+    display.fillRect(0, 0, 128, 56, SH110X_BLACK);
+  }
+  
   if (rtc.begin()) {
     DateTime now = rtc.now();
+    
+    // Clear date area
+    display.fillRect(5, 0, 118, 10, SH110X_BLACK);
     
     // Compact date/time
     display.setCursor(5, 0);
@@ -872,30 +925,43 @@ void drawHomeScreen() {
                   monthNames[now.month()-1],
                   now.year());
     
+    // Clear time area
+    display.fillRect(30, 15, 68, 16, SH110X_BLACK);
     display.setCursor(30, 15);
     display.setTextSize(2);
     display.printf("%02d:%02d", now.hour(), now.minute());
     display.setTextSize(1);
     
-    // Status
+    // Status - clear each line area
+    display.fillRect(5, 35, 60, 8, SH110X_BLACK);
     display.setCursor(5, 35);
     display.print("WiFi: ");
     display.print(WiFi.status() == WL_CONNECTED ? "ON" : "OFF");
     
+    display.fillRect(5, 45, 60, 8, SH110X_BLACK);
     display.setCursor(5, 45);
     display.print("Sensor: ");
     display.print(fingerprintInitialized ? "OK" : "ERR");
     
+    display.fillRect(5, 55, 60, 8, SH110X_BLACK);
     display.setCursor(5, 55);
     display.print("Enroll: READY");
     
   } else {
+    display.fillRect(35, 25, 58, 8, SH110X_BLACK);
     display.setCursor(35, 25);
     display.println("NO RTC");
   }
 }
 
-void drawMainMenu() {
+void drawMainMenu(bool forceRedraw) {
+  // Clear the menu area
+  if (forceRedraw) {
+    display.fillRect(0, 0, 128, 56, SH110X_BLACK);
+  }
+  
+  // Header
+  display.fillRect(50, 2, 28, 8, SH110X_BLACK);
   display.setCursor(50, 2);
   display.println("MENU");
   display.drawLine(0, 10, 127, 10, SH110X_WHITE);
@@ -910,9 +976,14 @@ void drawMainMenu() {
   for (int i = 0; i < 4; i++) {
     int yPos = 15 + (i * 12);
     
+    // Clear the menu item area before drawing
+    display.fillRect(0, yPos - 1, 128, 12, SH110X_BLACK);
+    
     if (i == menuIndex) {
       display.fillRect(0, yPos - 1, 128, 12, SH110X_WHITE);
       display.setTextColor(SH110X_BLACK);
+    } else {
+      display.setTextColor(SH110X_WHITE);
     }
     
     display.setCursor(5, yPos);
@@ -924,10 +995,20 @@ void drawMainMenu() {
   }
 }
 
-void drawEnrollmentScreen() {
+void drawEnrollmentScreen(bool forceRedraw) {
+  if (forceRedraw) {
+    display.fillRect(0, 0, 128, 56, SH110X_BLACK);
+  }
+  
+  // Clear header area
+  display.fillRect(45, 2, 38, 8, SH110X_BLACK);
   display.setCursor(45, 2);
   display.println("ENROLL");
   display.drawLine(0, 12, 127, 12, SH110X_WHITE);
+  
+  // Clear indicator areas
+  display.fillRect(100, 0, 28, 8, SH110X_BLACK);
+  display.fillRect(0, 0, 40, 8, SH110X_BLACK);
   
   // Indicators
   display.setCursor(100, 0);
@@ -935,6 +1016,9 @@ void drawEnrollmentScreen() {
   
   display.setCursor(0, 0);
   display.print(fingerprintInitialized ? "FP:OK" : "FP:ERR");
+  
+  // Clear main content area
+  display.fillRect(0, 13, 128, 43, SH110X_BLACK);
   
   switch(enrollState) {
     case ENROLL_IDLE:
@@ -960,12 +1044,14 @@ void drawEnrollmentScreen() {
         display.print(pendingStudentName);
       }
       
+      display.fillRect(20, 50, 88, 8, SH110X_BLACK);
       display.setCursor(20, 50);
       display.print("Press SELECT");
       break;
       
     case ENROLL_CAPTURING:
       // Fast enrollment instructions
+      display.fillRect(0, 20, 128, 30, SH110X_BLACK);
       switch(fpState) {
         case FP_WAIT_FOR_FIRST:
           display.setCursor(30, 20);
@@ -1013,31 +1099,47 @@ void drawEnrollmentScreen() {
   }
 }
 
-void drawWifiScanScreen() {
+void drawWifiScanScreen(bool forceRedraw) {
+  if (forceRedraw) {
+    display.fillRect(0, 0, 128, 56, SH110X_BLACK);
+  }
+  
+  display.fillRect(45, 2, 38, 8, SH110X_BLACK);
   display.setCursor(45, 2);
   display.println("WIFI SCAN");
   display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
+  display.fillRect(5, 16, 60, 8, SH110X_BLACK);
   display.setCursor(5, 16);
   display.print("Networks: ");
   display.print(wifiNetworkCount);
   
   if (wifiScanning) {
+    display.fillRect(40, 30, 48, 8, SH110X_BLACK);
     display.setCursor(40, 30);
     display.println("SCANNING...");
   } else if (wifiNetworkCount == 0) {
+    display.fillRect(25, 30, 78, 8, SH110X_BLACK);
     display.setCursor(25, 30);
     display.println("NO NETWORKS");
   } else {
+    // Clear network list area
+    display.fillRect(0, 16, 128, 40, SH110X_BLACK);
+    
     // Display networks (showing 4 at a time)
     int startIdx = (wifiSelectedIndex / 4) * 4;
     for (int i = 0; i < 4 && (startIdx + i) < wifiNetworkCount; i++) {
       int yPos = 16 + (i * 12);
       int idx = startIdx + i;
       
+      // Clear the line area
+      display.fillRect(0, yPos - 1, 128, 12, SH110X_BLACK);
+      
       if (idx == wifiSelectedIndex) {
         display.fillRect(0, yPos - 1, 128, 12, SH110X_WHITE);
         display.setTextColor(SH110X_BLACK);
+      } else {
+        display.setTextColor(SH110X_WHITE);
       }
       
       display.setCursor(2, yPos);
@@ -1057,12 +1159,20 @@ void drawWifiScanScreen() {
   }
 }
 
-void drawNetworkStatusScreen() {
+void drawNetworkStatusScreen(bool forceRedraw) {
+  if (forceRedraw) {
+    display.fillRect(0, 0, 128, 56, SH110X_BLACK);
+  }
+  
+  display.fillRect(15, 2, 98, 8, SH110X_BLACK);
   display.setCursor(15, 2);
   display.println("NETWORK STATUS");
   display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
   wl_status_t status = WiFi.status();
+  
+  // Clear content area
+  display.fillRect(10, 20, 108, 36, SH110X_BLACK);
   
   display.setCursor(10, 20);
   display.print("Status: ");
@@ -1100,12 +1210,18 @@ void drawNetworkStatusScreen() {
   }
 }
 
-void drawWifiConnectScreen() {
+void drawWifiConnectScreen(bool forceRedraw) {
+  if (forceRedraw) {
+    display.fillRect(0, 0, 128, 56, SH110X_BLACK);
+  }
+  
+  display.fillRect(35, 2, 58, 8, SH110X_BLACK);
   display.setCursor(35, 2);
   display.println("CONNECT");
   display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
   if (wifiSelectedIndex >= wifiNetworkCount || wifiNetworkCount == 0) {
+    display.fillRect(25, 30, 78, 8, SH110X_BLACK);
     display.setCursor(25, 30);
     display.println("NO NETWORK");
     return;
@@ -1115,6 +1231,7 @@ void drawWifiConnectScreen() {
   int bracketPos = selectedSSID.indexOf(" [");
   String ssidOnly = selectedSSID.substring(0, bracketPos);
   
+  display.fillRect(5, 16, 118, 8, SH110X_BLACK);
   display.setCursor(5, 16);
   display.print("SSID: ");
   if (ssidOnly.length() > 15) {
@@ -1123,6 +1240,7 @@ void drawWifiConnectScreen() {
     display.println(ssidOnly);
   }
   
+  display.fillRect(0, 32, 128, 24, SH110X_BLACK);
   if (selectedSSID.indexOf("[OPEN]") != -1) {
     display.setCursor(20, 32);
     display.println("OPEN NETWORK");
@@ -1136,12 +1254,20 @@ void drawWifiConnectScreen() {
   }
 }
 
-void drawWifiStatusScreen() {
+void drawWifiStatusScreen(bool forceRedraw) {
+  if (forceRedraw) {
+    display.fillRect(0, 0, 128, 56, SH110X_BLACK);
+  }
+  
+  display.fillRect(30, 2, 68, 8, SH110X_BLACK);
   display.setCursor(30, 2);
   display.println("WIFI INFO");
   display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
   wl_status_t status = WiFi.status();
+  
+  // Clear content area
+  display.fillRect(0, 13, 128, 43, SH110X_BLACK);
   
   if (status == WL_CONNECTED) {
     display.setCursor(10, 20);
@@ -1172,11 +1298,17 @@ void drawWifiStatusScreen() {
   }
 }
 
-void drawPasswordEntryScreen() {
+void drawPasswordEntryScreen(bool forceRedraw) {
+  if (forceRedraw) {
+    display.fillRect(0, 0, 128, 56, SH110X_BLACK);
+  }
+  
+  display.fillRect(30, 2, 68, 8, SH110X_BLACK);
   display.setCursor(30, 2);
   display.println("PASSWORD");
   display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
+  display.fillRect(5, 16, 118, 8, SH110X_BLACK);
   display.setCursor(5, 16);
   display.print("SSID: ");
   if (wifiSelectedIndex < wifiNetworkCount) {
@@ -1192,7 +1324,8 @@ void drawPasswordEntryScreen() {
     }
   }
   
-  // Show entered password
+  // Clear password display area
+  display.fillRect(5, 30, 118, 8, SH110X_BLACK);
   display.setCursor(5, 30);
   display.print("Pass: ");
   if (passwordCursorPos > 0) {
@@ -1203,11 +1336,15 @@ void drawPasswordEntryScreen() {
     display.print("<enter>");
   }
   
+  // Clear cursor area
+  display.fillRect(5, 40, 118, 10, SH110X_BLACK);
+  
   // Show cursor
   display.setCursor(5 + (passwordCursorPos * 6), 40);
   display.print("_");
   
   // Show current character
+  display.fillRect(50, 50, 40, 8, SH110X_BLACK);
   display.setCursor(50, 50);
   display.print("Char: ");
   if (passwordCursorPos < 63) {
@@ -1217,20 +1354,28 @@ void drawPasswordEntryScreen() {
   }
 }
 
-void drawAboutScreen() {
+void drawAboutScreen(bool forceRedraw) {
+  if (forceRedraw) {
+    display.fillRect(0, 0, 128, 56, SH110X_BLACK);
+  }
+  
+  display.fillRect(45, 2, 38, 8, SH110X_BLACK);
   display.setCursor(45, 2);
   display.println("ABOUT");
   display.drawLine(0, 12, 127, 12, SH110X_WHITE);
   
+  display.fillRect(20, 20, 88, 16, SH110X_BLACK);
   display.setCursor(20, 20);
   display.println("SMART ENROLL");
   display.setCursor(35, 30);
   display.println("SYSTEM v3.2");
   
+  display.fillRect(5, 45, 60, 8, SH110X_BLACK);
   display.setCursor(5, 45);
   display.print("Sensor: ");
   display.print(fingerprintInitialized ? "OK" : "ERR");
   
+  display.fillRect(5, 55, 60, 8, SH110X_BLACK);
   display.setCursor(5, 55);
   display.print("WiFi: ");
   display.print(WiFi.status() == WL_CONNECTED ? "ON" : "OFF");
@@ -1282,6 +1427,7 @@ void handleLongPress(int button) {
     }
     
     currentScreen = SCREEN_WIFI_CONNECT;
+    screenChanged = true;
     connectToWiFi(wifiNetworks[wifiSelectedIndex], password);
     
     memset(passwordChars, 0, sizeof(passwordChars));
@@ -1297,25 +1443,36 @@ void handleLongPress(int button) {
 void handleButtonPress(int button) {
   needRefresh = true;
   
+  // Track menu index changes for proper redraw
+  int oldMenuIndex = menuIndex;
+  
   switch(currentScreen) {
     case SCREEN_HOME:
       if (button == 2) {
         currentScreen = SCREEN_MAIN_MENU;
         menuIndex = 0;
+        screenChanged = true;
       }
       break;
       
     case SCREEN_MAIN_MENU:
-      if (button == 0) menuIndex = (menuIndex > 0) ? menuIndex - 1 : 3;
-      else if (button == 1) menuIndex = (menuIndex < 3) ? menuIndex + 1 : 0;
-      else if (button == 2) {
+      if (button == 0) {
+        menuIndex = (menuIndex > 0) ? menuIndex - 1 : 3;
+        if (oldMenuIndex != menuIndex) needRefresh = true;
+      } else if (button == 1) {
+        menuIndex = (menuIndex < 3) ? menuIndex + 1 : 0;
+        if (oldMenuIndex != menuIndex) needRefresh = true;
+      } else if (button == 2) {
         switch(menuIndex) {
-          case 0: currentScreen = SCREEN_ENROLL_MODE; resetEnrollmentState(); break;
-          case 1: currentScreen = SCREEN_WIFI_SCAN; wifiSelectedIndex = 0; scanWiFiNetworks(); break;
-          case 2: currentScreen = SCREEN_NETWORK_STATUS; break;
-          case 3: currentScreen = SCREEN_ABOUT; break;
+          case 0: currentScreen = SCREEN_ENROLL_MODE; resetEnrollmentState(); screenChanged = true; break;
+          case 1: currentScreen = SCREEN_WIFI_SCAN; wifiSelectedIndex = 0; scanWiFiNetworks(); screenChanged = true; break;
+          case 2: currentScreen = SCREEN_NETWORK_STATUS; screenChanged = true; break;
+          case 3: currentScreen = SCREEN_ABOUT; screenChanged = true; break;
         }
-      } else if (button == 3) currentScreen = SCREEN_HOME;
+      } else if (button == 3) {
+        currentScreen = SCREEN_HOME;
+        screenChanged = true;
+      }
       break;
       
     case SCREEN_ENROLL_MODE:
@@ -1326,29 +1483,38 @@ void handleButtonPress(int button) {
           studentInProgress = true;
           enrollmentStartTime = millis();
           showNotificationMsg("Start!");
+          needRefresh = true;
         } else if (enrollState == ENROLL_ERROR) {
           enrollState = ENROLL_PENDING;
           showNotificationMsg("Retry");
+          needRefresh = true;
         }
       } else if (button == 3) {
         resetEnrollmentState();
         currentScreen = SCREEN_MAIN_MENU;
+        screenChanged = true;
       }
       break;
       
     case SCREEN_WIFI_SCAN:
-      if (button == 0) wifiSelectedIndex = (wifiSelectedIndex > 0) ? wifiSelectedIndex - 1 : wifiNetworkCount - 1;
-      else if (button == 1) wifiSelectedIndex = (wifiSelectedIndex < wifiNetworkCount - 1) ? wifiSelectedIndex + 1 : 0;
-      else if (button == 2) {
+      if (button == 0) {
+        wifiSelectedIndex = (wifiSelectedIndex > 0) ? wifiSelectedIndex - 1 : wifiNetworkCount - 1;
+        needRefresh = true;
+      } else if (button == 1) {
+        wifiSelectedIndex = (wifiSelectedIndex < wifiNetworkCount - 1) ? wifiSelectedIndex + 1 : 0;
+        needRefresh = true;
+      } else if (button == 2) {
         if (wifiNetworkCount > 0 && wifiSelectedIndex < wifiNetworkCount) {
           String selectedSSID = wifiNetworks[wifiSelectedIndex];
           if (selectedSSID.indexOf("[OPEN]") != -1) {
             // Open network
             connectToWiFi(selectedSSID, "");
             currentScreen = SCREEN_WIFI_STATUS;
+            screenChanged = true;
           } else {
             // Password required
             currentScreen = SCREEN_PASSWORD_ENTRY;
+            screenChanged = true;
             memset(passwordChars, 0, sizeof(passwordChars));
             passwordCursorPos = 0;
             passwordChars[0] = charSet[0];
@@ -1357,6 +1523,7 @@ void handleButtonPress(int button) {
       } else if (button == 3) {
         currentScreen = SCREEN_MAIN_MENU;
         wifiSelectedIndex = 0;
+        screenChanged = true;
       }
       break;
       
@@ -1367,6 +1534,7 @@ void handleButtonPress(int button) {
           for (int i = 0; i < charSetLength; i++) {
             if (passwordChars[passwordCursorPos] == charSet[i]) {
               passwordChars[passwordCursorPos] = charSet[(i + 1) % charSetLength];
+              needRefresh = true;
               break;
             }
           }
@@ -1377,6 +1545,7 @@ void handleButtonPress(int button) {
           for (int i = 0; i < charSetLength; i++) {
             if (passwordChars[passwordCursorPos] == charSet[i]) {
               passwordChars[passwordCursorPos] = charSet[(i - 1 + charSetLength) % charSetLength];
+              needRefresh = true;
               break;
             }
           }
@@ -1388,13 +1557,16 @@ void handleButtonPress(int button) {
           if (passwordChars[passwordCursorPos] == 0) {
             passwordChars[passwordCursorPos] = charSet[0];
           }
+          needRefresh = true;
         }
       } else if (button == 3) {
         // Back or cancel
         if (passwordCursorPos > 0) {
           passwordCursorPos--;
+          needRefresh = true;
         } else {
           currentScreen = SCREEN_WIFI_SCAN;
+          screenChanged = true;
         }
       }
       break;
@@ -1402,18 +1574,21 @@ void handleButtonPress(int button) {
     case SCREEN_WIFI_STATUS:
       if (button == 3) {
         currentScreen = SCREEN_MAIN_MENU;
+        screenChanged = true;
       }
       break;
       
     case SCREEN_NETWORK_STATUS:
       if (button == 3) {
         currentScreen = SCREEN_MAIN_MENU;
+        screenChanged = true;
       }
       break;
       
     case SCREEN_ABOUT:
       if (button == 3) {
         currentScreen = SCREEN_MAIN_MENU;
+        screenChanged = true;
       }
       break;
       
