@@ -110,7 +110,7 @@ const char* charSet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234
 int charSetLength = 84;
 
 // Backend Configuration - CHANGE THIS TO YOUR IP
-String BACKEND_URL = "http://192.168.0.119:5000";
+String BACKEND_URL = "http://192.168.0.119:5001";
 
 // Enrollment Data
 String pendingStudentName = "";
