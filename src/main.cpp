@@ -1,7 +1,7 @@
 /**
  * ESP32 SMART ENROLL SYSTEM - OPTIMIZED ENROLLMENT
  * Fastest possible fingerprint enrollment for R307 sensor
- * Version: 3.2 Fast Enroll - UI FIXED
+ * Version: 3.3 Fast Enroll - WITH MICROSD AND RTC FIX
  */
 
 #include <Wire.h>
@@ -13,6 +13,9 @@
 #include <ArduinoJson.h>
 #include <Adafruit_Fingerprint.h>
 #include <Preferences.h>
+#include "FS.h"
+#include "SD.h"
+#include "SPI.h"
 
 // =================== PIN CONFIGURATION ===================
 #define OLED_SDA 21
@@ -23,6 +26,12 @@
 #define BUTTON_BACK 26
 #define FINGERPRINT_TX 4
 #define FINGERPRINT_RX 2
+
+// =================== MICROSD CARD PINS ===================
+#define SD_MOSI 23
+#define SD_MISO 19
+#define SD_SCK 18
+#define SD_CS 5
 
 // =================== OLED SETUP ===================
 #define SCREEN_WIDTH 128
@@ -50,7 +59,10 @@ enum ScreenState {
   SCREEN_WIFI_CONNECT,
   SCREEN_WIFI_STATUS,
   SCREEN_PASSWORD_ENTRY,
-  SCREEN_ABOUT
+  SCREEN_ABOUT,
+  SCREEN_SD_MENU,
+  SCREEN_SD_LOGS,
+  SCREEN_RTC_SETUP
 };
 
 // =================== ENROLLMENT STATES ===================
@@ -81,9 +93,16 @@ ScreenState currentScreen = SCREEN_BOOT;
 EnrollState enrollState = ENROLL_IDLE;
 FingerprintState fpState = FP_IDLE;
 int menuIndex = 0;
+int sdMenuIndex = 0;
+int sdLogIndex = 0;
 bool needRefresh = true;
 bool displayInitialized = false;
 bool fingerprintInitialized = false;
+bool sdCardInitialized = false;
+File logFile;
+
+// RTC time adjustment (27 minutes fix)
+const int RTC_TIME_ADJUST_MINUTES = 27;
 
 // Button tracking
 unsigned long buttonPressTime[4] = {0, 0, 0, 0};
@@ -141,6 +160,11 @@ unsigned long notificationStartTime = 0;
 const unsigned long NOTIFICATION_DURATION = 2000;
 wl_status_t lastWifiStatus = WL_IDLE_STATUS;
 
+// SD Card Logging
+String sdLogs[20];
+int sdLogCount = 0;
+bool sdLoggingEnabled = true;
+
 // Day and month names
 const char* dayNames[7] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
 const char* monthNames[12] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN", 
@@ -149,6 +173,10 @@ const char* monthNames[12] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN",
 // =================== FUNCTION DECLARATIONS ===================
 void initializeHardware();
 void initializePreferences();
+void initializeSDCard();
+void logToSD(String message);
+void readLogsFromSD();
+void clearSDLogs();
 void showScreen();
 void drawFooter();
 void checkButtons();
@@ -169,6 +197,8 @@ void sendEnrollmentConfirmation(int rollNo, int fingerprintId);
 void resetEnrollmentState();
 void resetFingerprintState();
 void showDetailedError(int errorCode);
+DateTime getAdjustedDateTime();
+void adjustRTC();
 
 // Screen drawing functions
 void drawBootScreen();
@@ -181,6 +211,9 @@ void drawWifiConnectScreen();
 void drawWifiStatusScreen();
 void drawPasswordEntryScreen();
 void drawAboutScreen();
+void drawSDMenuScreen();
+void drawSDLogsScreen();
+void drawRTCSetupScreen();
 
 // =================== SETUP ===================
 void setup() {
@@ -188,8 +221,8 @@ void setup() {
   delay(1000);
   
   Serial.println("\n╔══════════════════════════════════╗");
-  Serial.println("║   SMART ENROLL SYSTEM v3.2      ║");
-  Serial.println("║   FAST ENROLLMENT VERSION       ║");
+  Serial.println("║   SMART ENROLL SYSTEM v3.3      ║");
+  Serial.println("║   WITH MICROSD & RTC FIX        ║");
   Serial.println("╚══════════════════════════════════╝");
   
   initializeHardware();
@@ -203,6 +236,9 @@ void setup() {
   needRefresh = true;
   
   lastWifiStatus = WiFi.status();
+  
+  // Log initial boot
+  logToSD("System booted - v3.3 with SD Card");
   
   Serial.println("System ready for fast enrollment!");
 }
@@ -245,9 +281,14 @@ void initializeHardware() {
     Serial.println("⚠️ RTC not found");
   } else {
     if (rtc.lostPower()) {
-      rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+      DateTime compileTime = DateTime(F(__DATE__), F(__TIME__));
+      // Apply 27 minute adjustment
+      compileTime = compileTime + TimeSpan(0, 0, RTC_TIME_ADJUST_MINUTES, 0);
+      rtc.adjust(compileTime);
+      Serial.println("RTC lost power - set to compile time + 27 min");
     }
     Serial.println("✅ RTC initialized");
+    logToSD("RTC initialized");
   }
   
   // Initialize Buttons
@@ -257,7 +298,7 @@ void initializeHardware() {
   pinMode(BUTTON_BACK, INPUT_PULLUP);
   Serial.println("✅ Buttons initialized");
   
-  // Initialize Fingerprint Sensor (ONCE - NOT every time enroll mode is entered)
+  // Initialize Fingerprint Sensor
   Serial.println("Initializing fingerprint sensor...");
   fingerSerial.begin(57600, SERIAL_8N1, FINGERPRINT_RX, FINGERPRINT_TX);
   delay(1000);
@@ -278,6 +319,8 @@ void initializeHardware() {
       Serial.print("Templates: ");
       Serial.println(templateCount);
       
+      logToSD("Fingerprint sensor OK - Templates: " + String(templateCount));
+      
       break;
     } else {
       Serial.println("❌ FAILED");
@@ -287,7 +330,11 @@ void initializeHardware() {
   
   if (!fingerprintInitialized) {
     Serial.println("❌ FINGERPRINT SENSOR NOT FOUND!");
+    logToSD("Fingerprint sensor FAILED");
   }
+  
+  // Initialize SD Card
+  initializeSDCard();
   
   // Initialize WiFi
   WiFi.mode(WIFI_STA);
@@ -296,6 +343,145 @@ void initializeHardware() {
   Serial.println("✅ WiFi initialized");
   
   Serial.println("✅ Hardware initialization complete");
+}
+
+// =================== INITIALIZE SD CARD ===================
+void initializeSDCard() {
+  Serial.println("Initializing SD card...");
+  
+  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  
+  if (!SD.begin(SD_CS)) {
+    Serial.println("❌ SD Card initialization failed!");
+    sdCardInitialized = false;
+    return;
+  }
+  
+  uint8_t cardType = SD.cardType();
+  if (cardType == CARD_NONE) {
+    Serial.println("❌ No SD card found");
+    sdCardInitialized = false;
+    return;
+  }
+  
+  Serial.print("SD Card Type: ");
+  if (cardType == CARD_MMC) {
+    Serial.println("MMC");
+  } else if (cardType == CARD_SD) {
+    Serial.println("SDSC");
+  } else if (cardType == CARD_SDHC) {
+    Serial.println("SDHC");
+  } else {
+    Serial.println("UNKNOWN");
+  }
+  
+  uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+  Serial.printf("SD Card Size: %lluMB\n", cardSize);
+  
+  sdCardInitialized = true;
+  
+  // Create logs directory if it doesn't exist
+  if (!SD.exists("/logs")) {
+    SD.mkdir("/logs");
+  }
+  
+  // Create initial log entry
+  logToSD("SD Card initialized successfully");
+  logToSD("Card size: " + String(cardSize) + "MB");
+  
+  Serial.println("✅ SD Card initialized");
+}
+
+// =================== SD CARD LOGGING FUNCTIONS ===================
+void logToSD(String message) {
+  if (!sdCardInitialized) return;
+  
+  DateTime now = getAdjustedDateTime();
+  
+  char timestamp[20];
+  sprintf(timestamp, "%04d-%02d-%02d %02d:%02d:%02d",
+          now.year(), now.month(), now.day(),
+          now.hour(), now.minute(), now.second());
+  
+  String logEntry = String(timestamp) + " - " + message;
+  
+  // Also print to serial
+  Serial.println("[SD LOG] " + logEntry);
+  
+  // Open log file for appending
+  File file = SD.open("/logs/enroll.log", FILE_APPEND);
+  if (!file) {
+    Serial.println("Failed to open log file");
+    return;
+  }
+  
+  file.println(logEntry);
+  file.close();
+}
+
+void readLogsFromSD() {
+  if (!sdCardInitialized) {
+    sdLogCount = 0;
+    sdLogs[0] = "SD Card not available";
+    sdLogCount = 1;
+    return;
+  }
+  
+  File file = SD.open("/logs/enroll.log");
+  if (!file) {
+    sdLogCount = 0;
+    sdLogs[0] = "No log file found";
+    sdLogCount = 1;
+    return;
+  }
+  
+  sdLogCount = 0;
+  while (file.available() && sdLogCount < 20) {
+    String line = file.readStringUntil('\n');
+    line.trim();
+    if (line.length() > 0) {
+      sdLogs[sdLogCount] = line;
+      sdLogCount++;
+    }
+  }
+  file.close();
+  
+  if (sdLogCount == 0) {
+    sdLogs[0] = "Log file is empty";
+    sdLogCount = 1;
+  }
+}
+
+void clearSDLogs() {
+  if (!sdCardInitialized) return;
+  
+  SD.remove("/logs/enroll.log");
+  logToSD("Logs cleared manually");
+  showNotificationMsg("Logs cleared");
+}
+
+// =================== RTC FUNCTIONS ===================
+DateTime getAdjustedDateTime() {
+  if (!rtc.begin()) {
+    return DateTime(2000, 1, 1, 0, 0, 0);
+  }
+  
+  DateTime now = rtc.now();
+  // Apply the 27 minute adjustment
+  now = now + TimeSpan(0, 0, RTC_TIME_ADJUST_MINUTES, 0);
+  return now;
+}
+
+void adjustRTC() {
+  if (!rtc.begin()) return;
+  
+  DateTime now = rtc.now();
+  // Add 27 minutes to fix the timing issue
+  DateTime adjustedTime = now + TimeSpan(0, 0, RTC_TIME_ADJUST_MINUTES, 0);
+  rtc.adjust(adjustedTime);
+  
+  logToSD("RTC adjusted by +27 minutes");
+  showNotificationMsg("RTC adjusted +27min");
 }
 
 // =================== MAIN LOOP ===================
@@ -324,6 +510,7 @@ void loop() {
   
   if (studentInProgress && (millis() - enrollmentStartTime > ENROLLMENT_TIMEOUT)) {
     Serial.println("⏰ Enrollment timeout");
+    logToSD("Enrollment timeout for Roll: " + String(pendingStudentRoll));
     showNotificationMsg("Timeout");
     resetEnrollmentState();
   }
@@ -344,7 +531,7 @@ void loop() {
   delay(20);
 }
 
-// =================== WIFI FUNCTIONS - FIXED ===================
+// =================== WIFI FUNCTIONS ===================
 void checkWifiStatusChange() {
   wl_status_t currentStatus = WiFi.status();
   
@@ -355,7 +542,9 @@ void checkWifiStatusChange() {
     // Update connected SSID when status changes
     if (currentStatus == WL_CONNECTED && connectedSSID.length() == 0) {
       connectedSSID = WiFi.SSID();
-    } else if (currentStatus != WL_CONNECTED) {
+      logToSD("WiFi connected to: " + connectedSSID);
+    } else if (currentStatus != WL_CONNECTED && connectedSSID.length() > 0) {
+      logToSD("WiFi disconnected from: " + connectedSSID);
       connectedSSID = "";
     }
   }
@@ -378,6 +567,7 @@ void updateWiFiConnection() {
     
     Serial.print("Connected to: ");
     Serial.println(connectedSSID);
+    logToSD("WiFi connection successful: " + connectedSSID);
   }
   else if (millis() - wifiConnectionStartTime > WIFI_CONNECTION_TIMEOUT) {
     wifiConnecting = false;
@@ -385,6 +575,7 @@ void updateWiFiConnection() {
     showNotificationMsg("Failed");
     
     Serial.println("WiFi connection timeout");
+    logToSD("WiFi connection timeout for: " + wifiNetworks[wifiSelectedIndex]);
   }
 }
 
@@ -429,6 +620,7 @@ void scanWiFiNetworks() {
   delay(100);
   
   showNotificationMsg("Scanning...");
+  logToSD("WiFi scan started");
   
   int16_t n = WiFi.scanNetworks();
   
@@ -468,8 +660,10 @@ void scanWiFiNetworks() {
   
   if (wifiNetworkCount == 0) {
     showNotificationMsg("No networks");
+    logToSD("WiFi scan: No networks found");
   } else {
     showNotificationMsg(String(wifiNetworkCount) + " networks");
+    logToSD("WiFi scan: " + String(wifiNetworkCount) + " networks found");
   }
 }
 
@@ -488,6 +682,7 @@ void connectToWiFi(String ssid, String password) {
   needRefresh = true;
   
   showNotificationMsg("Connecting...");
+  logToSD("Connecting to WiFi: " + ssidOnly);
   
   Serial.print("Connecting to: ");
   Serial.println(ssidOnly);
@@ -500,7 +695,7 @@ void connectToWiFi(String ssid, String password) {
   WiFi.begin(ssidOnly.c_str(), password.c_str());
 }
 
-// =================== ENROLLMENT FUNCTIONS - FIXED FINGERPRINT BLINKING ===================
+// =================== ENROLLMENT FUNCTIONS ===================
 void pollServerForEnrollment() {
   if (WiFi.status() != WL_CONNECTED) {
     showNotificationMsg("No WiFi");
@@ -536,6 +731,7 @@ void pollServerForEnrollment() {
         needRefresh = true;
         
         showNotificationMsg("Ready!");
+        logToSD("New enrollment pending - Roll: " + String(newRoll) + ", Name: " + newName);
       }
     } else {
       if (enrollState != ENROLL_IDLE) {
@@ -548,7 +744,6 @@ void pollServerForEnrollment() {
   http.end();
 }
 
-// =================== OPTIMIZED FINGERPRINT ENROLLMENT - FIXED BLINKING ===================
 void handleFingerprintEnrollmentFast() {
   static unsigned long stateStartTime = 0;
   static int result;
@@ -559,6 +754,7 @@ void handleFingerprintEnrollmentFast() {
     firstCaptureDone = false;
     secondCaptureDone = false;
     Serial.println("Starting FAST enrollment...");
+    logToSD("Enrollment started for Roll: " + String(pendingStudentRoll));
     
     // Turn on LED only when starting enrollment
     if (fingerprintInitialized) {
@@ -572,6 +768,7 @@ void handleFingerprintEnrollmentFast() {
   // Check for overall timeout
   if (millis() - fpStateStartTime > 20000) {
     Serial.println("Enrollment timeout");
+    logToSD("Enrollment timeout for Roll: " + String(pendingStudentRoll));
     showNotificationMsg("Too slow");
     
     // Turn off LED on timeout
@@ -588,7 +785,7 @@ void handleFingerprintEnrollmentFast() {
   
   switch(fpState) {
     case FP_WAIT_FOR_FIRST:
-      if (millis() - stateStartTime > 500) { // Increased from 200ms to reduce blinking
+      if (millis() - stateStartTime > 500) {
         result = finger.getImage();
         
         if (result == FINGERPRINT_OK) {
@@ -599,6 +796,7 @@ void handleFingerprintEnrollmentFast() {
         // Check for timeout in waiting for finger
         else if (millis() - fpStateStartTime > 10000) {
           Serial.println("Timeout waiting for finger");
+          logToSD("Timeout waiting for first finger - Roll: " + String(pendingStudentRoll));
           showNotificationMsg("No finger");
           fpState = FP_FAILED;
         }
@@ -612,19 +810,21 @@ void handleFingerprintEnrollmentFast() {
       result = finger.image2Tz(1);
       if (result == FINGERPRINT_OK) {
         Serial.println("First image OK");
+        logToSD("First fingerprint captured - Roll: " + String(pendingStudentRoll));
         firstCaptureDone = true;
         showNotificationMsg("Lift finger");
         fpState = FP_WAIT_FOR_REMOVAL;
         stateStartTime = millis();
       } else {
         Serial.println("First capture failed");
+        logToSD("First fingerprint capture failed - Roll: " + String(pendingStudentRoll));
         showNotificationMsg("Failed - Retry");
         fpState = FP_FAILED;
       }
       break;
       
     case FP_WAIT_FOR_REMOVAL:
-      if (millis() - stateStartTime > 500) { // Increased from 200ms
+      if (millis() - stateStartTime > 500) {
         result = finger.getImage();
         
         if (result == FINGERPRINT_NOFINGER) {
@@ -638,6 +838,7 @@ void handleFingerprintEnrollmentFast() {
           // Check if finger has been there too long
           if (millis() - stateStartTime > 5000) {
             Serial.println("Finger not lifted");
+            logToSD("Finger not lifted after first capture - Roll: " + String(pendingStudentRoll));
             showNotificationMsg("Remove finger");
             fpState = FP_FAILED;
           }
@@ -647,7 +848,7 @@ void handleFingerprintEnrollmentFast() {
       break;
       
     case FP_WAIT_FOR_SECOND:
-      if (millis() - stateStartTime > 500) { // Increased from 200ms
+      if (millis() - stateStartTime > 500) {
         result = finger.getImage();
         
         if (result == FINGERPRINT_OK) {
@@ -658,6 +859,7 @@ void handleFingerprintEnrollmentFast() {
         // Check for timeout waiting for second finger
         else if (millis() - stateStartTime > 8000) {
           Serial.println("Timeout waiting for 2nd finger");
+          logToSD("Timeout waiting for second finger - Roll: " + String(pendingStudentRoll));
           showNotificationMsg("Too slow");
           fpState = FP_FAILED;
         }
@@ -671,12 +873,14 @@ void handleFingerprintEnrollmentFast() {
       result = finger.image2Tz(2);
       if (result == FINGERPRINT_OK) {
         Serial.println("Second image OK");
+        logToSD("Second fingerprint captured - Roll: " + String(pendingStudentRoll));
         secondCaptureDone = true;
         showNotificationMsg("Processing...");
         fpState = FP_PROCESSING;
         stateStartTime = millis();
       } else {
         Serial.println("Second capture failed");
+        logToSD("Second fingerprint capture failed - Roll: " + String(pendingStudentRoll));
         showNotificationMsg("Failed - Retry");
         fpState = FP_FAILED;
       }
@@ -695,6 +899,9 @@ void handleFingerprintEnrollmentFast() {
           Serial.print("Stored ID: ");
           Serial.println(pendingStudentRoll);
           
+          // Log successful storage
+          logToSD("Fingerprint model created and stored - Roll: " + String(pendingStudentRoll));
+          
           // Turn off LED after successful enrollment
           if (fingerprintInitialized) {
             finger.LEDcontrol(false);
@@ -706,16 +913,19 @@ void handleFingerprintEnrollmentFast() {
         } else {
           Serial.print("Store failed: ");
           Serial.println(result);
+          logToSD("Fingerprint store failed - Error: " + String(result) + " - Roll: " + String(pendingStudentRoll));
           showDetailedError(result);
           fpState = FP_FAILED;
         }
       } else if (result == FINGERPRINT_ENROLLMISMATCH) {
         Serial.println("Fingers don't match");
+        logToSD("Fingerprint mismatch - Roll: " + String(pendingStudentRoll));
         showNotificationMsg("Mismatch - Retry");
         fpState = FP_FAILED;
       } else {
         Serial.print("Model failed: ");
         Serial.println(result);
+        logToSD("Fingerprint model creation failed - Error: " + String(result) + " - Roll: " + String(pendingStudentRoll));
         showNotificationMsg("Failed");
         fpState = FP_FAILED;
       }
@@ -726,6 +936,7 @@ void handleFingerprintEnrollmentFast() {
       
     case FP_FAILED:
       Serial.println("Fingerprint enrollment failed - resetting");
+      logToSD("Fingerprint enrollment failed - Roll: " + String(pendingStudentRoll));
       
       // Turn off LED on failure
       if (fingerprintInitialized) {
@@ -795,6 +1006,7 @@ void sendEnrollmentConfirmation(int rollNo, int fingerprintId) {
   if (WiFi.status() != WL_CONNECTED) {
     enrollState = ENROLL_ERROR;
     showNotificationMsg("No WiFi");
+    logToSD("Upload failed - No WiFi - Roll: " + String(rollNo));
     return;
   }
   
@@ -818,12 +1030,14 @@ void sendEnrollmentConfirmation(int rollNo, int fingerprintId) {
   if (httpCode == 200) {
     enrollState = ENROLL_SUCCESS;
     showNotificationMsg("✅ Success!");
+    logToSD("Enrollment completed successfully - Roll: " + String(rollNo) + ", FP ID: " + String(fingerprintId));
     
     delay(1000);
     resetEnrollmentState();
   } else {
     enrollState = ENROLL_ERROR;
     showNotificationMsg("Upload failed");
+    logToSD("Upload failed - HTTP: " + String(httpCode) + " - Roll: " + String(rollNo));
   }
   
   http.end();
@@ -864,7 +1078,7 @@ void resetFingerprintState() {
   }
 }
 
-// =================== DISPLAY FUNCTIONS - FIXED UI ===================
+// =================== DISPLAY FUNCTIONS ===================
 void showScreen() {
   if (!displayInitialized) return;
   
@@ -905,6 +1119,15 @@ void showScreen() {
       break;
     case SCREEN_ABOUT:
       drawAboutScreen();
+      break;
+    case SCREEN_SD_MENU:
+      drawSDMenuScreen();
+      break;
+    case SCREEN_SD_LOGS:
+      drawSDLogsScreen();
+      break;
+    case SCREEN_RTC_SETUP:
+      drawRTCSetupScreen();
       break;
   }
   
@@ -961,6 +1184,16 @@ void drawFooter() {
       }
       break;
       
+    case SCREEN_SD_MENU:
+    case SCREEN_SD_LOGS:
+      display.setCursor(5, 56);
+      display.print("U/D");
+      display.setCursor(40, 56);
+      display.print("SEL");
+      display.setCursor(80, 56);
+      display.print("B=BACK");
+      break;
+      
     default:
       if (currentScreen != SCREEN_BOOT && currentScreen != SCREEN_HOME) {
         display.setCursor(50, 56);
@@ -971,7 +1204,6 @@ void drawFooter() {
 }
 
 void drawBootScreen() {
-  // Clear entire screen except header area
   display.fillRect(0, 0, 128, 64, SH110X_BLACK);
   
   display.setCursor(25, 15);
@@ -981,73 +1213,71 @@ void drawBootScreen() {
   display.println("ENROLL");
   display.setTextSize(1);
   display.setCursor(40, 56);
-  display.print("v3.2 FAST");
+  display.print("v3.3 SD+RTC");
 }
 
 void drawHomeScreen() {
-  // Clear content area (below header line)
   display.fillRect(0, 11, 128, 45, SH110X_BLACK);
   
-  if (rtc.begin()) {
-    DateTime now = rtc.now();
-    
-    // Date at top (centered)
-    display.setCursor(15, 0);
-    display.printf("%s %02d %s %04d", 
-                  dayNames[now.dayOfTheWeek()], 
-                  now.day(),
-                  monthNames[now.month()-1],
-                  now.year());
-    
-    // Time centered (larger font)
-    display.setCursor(30, 20);
-    display.setTextSize(2);
-    display.printf("%02d:%02d", now.hour(), now.minute());
-    display.setTextSize(1);
-    
-    // Clean status indicators only
-    display.setCursor(5, 40);
-    display.print("WiFi: ");
-    display.print(WiFi.status() == WL_CONNECTED ? "ON" : "OFF");
-    
-    display.setCursor(70, 40);
-    display.print("FP: ");
-    display.print(fingerprintInitialized ? "OK" : "ERR");
-    
-  } else {
-    display.setCursor(35, 25);
-    display.println("NO RTC");
-  }
+  DateTime now = getAdjustedDateTime();
+  
+  // Date at top (centered)
+  display.setCursor(15, 0);
+  display.printf("%s %02d %s %04d", 
+                dayNames[now.dayOfTheWeek()], 
+                now.day(),
+                monthNames[now.month()-1],
+                now.year());
+  
+  // Time centered (larger font)
+  display.setCursor(30, 20);
+  display.setTextSize(2);
+  display.printf("%02d:%02d", now.hour(), now.minute());
+  display.setTextSize(1);
+  
+  // Status indicators
+  display.setCursor(5, 40);
+  display.print("WiFi: ");
+  display.print(WiFi.status() == WL_CONNECTED ? "ON" : "OFF");
+  
+  display.setCursor(70, 40);
+  display.print("FP: ");
+  display.print(fingerprintInitialized ? "OK" : "ERR");
+  
+  // SD Card status
+  display.setCursor(5, 50);
+  display.print("SD: ");
+  display.print(sdCardInitialized ? "OK" : "NO");
 }
 
 void drawMainMenu() {
-  // Clear content area
   display.fillRect(0, 11, 128, 45, SH110X_BLACK);
   
   display.setCursor(50, 0);
   display.println("MENU");
   
-  String menuItems[4] = {
+  String menuItems[6] = {
     "1. ENROLL MODE",
     "2. WIFI SCAN",
     "3. NETWORK STATUS",
-    "4. ABOUT"
+    "4. SD CARD MENU",
+    "5. RTC SETUP",
+    "6. ABOUT"
   };
   
   // Calculate start index for scrolling
   int startIdx = 0;
   if (menuIndex > 2) {
-    startIdx = menuIndex - 2; // Show 2 items before selected if at bottom
+    startIdx = menuIndex - 2;
   }
   
   // Display 3 menu items maximum
   for (int i = 0; i < 3; i++) {
     int itemIdx = startIdx + i;
-    if (itemIdx >= 4) break;
+    if (itemIdx >= 6) break;
     
     int yPos = 15 + (i * 12);
     
-    // Clear menu item area completely
     display.fillRect(0, yPos - 1, 128, 12, SH110X_BLACK);
     
     if (itemIdx == menuIndex) {
@@ -1065,7 +1295,6 @@ void drawMainMenu() {
 }
 
 void drawEnrollmentScreen() {
-  // Clear content area
   display.fillRect(0, 11, 128, 45, SH110X_BLACK);
   
   display.setCursor(45, 0);
@@ -1165,7 +1394,6 @@ void drawEnrollmentScreen() {
 }
 
 void drawWifiScanScreen() {
-  // Clear content area
   display.fillRect(0, 11, 128, 45, SH110X_BLACK);
   
   display.setCursor(45, 0);
@@ -1178,13 +1406,11 @@ void drawWifiScanScreen() {
     display.setCursor(25, 30);
     display.println("NO NETWORKS");
   } else {
-    // Display networks with scrolling
     int startIdx = (wifiSelectedIndex / 3) * 3;
     for (int i = 0; i < 3 && (startIdx + i) < wifiNetworkCount; i++) {
       int yPos = 15 + (i * 12);
       int idx = startIdx + i;
       
-      // Clear line area
       display.fillRect(0, yPos - 1, 128, 12, SH110X_BLACK);
       
       if (idx == wifiSelectedIndex) {
@@ -1209,7 +1435,6 @@ void drawWifiScanScreen() {
 }
 
 void drawNetworkStatusScreen() {
-  // Clear content area
   display.fillRect(0, 11, 128, 45, SH110X_BLACK);
   
   display.setCursor(15, 0);
@@ -1261,7 +1486,6 @@ void drawNetworkStatusScreen() {
 }
 
 void drawWifiConnectScreen() {
-  // Clear content area
   display.fillRect(0, 11, 128, 45, SH110X_BLACK);
   
   display.setCursor(35, 0);
@@ -1299,7 +1523,6 @@ void drawWifiConnectScreen() {
 }
 
 void drawWifiStatusScreen() {
-  // Clear content area
   display.fillRect(0, 11, 128, 45, SH110X_BLACK);
   
   display.setCursor(30, 0);
@@ -1337,7 +1560,6 @@ void drawWifiStatusScreen() {
 }
 
 void drawPasswordEntryScreen() {
-  // Clear content area
   display.fillRect(0, 11, 128, 45, SH110X_BLACK);
   
   display.setCursor(30, 0);
@@ -1381,8 +1603,106 @@ void drawPasswordEntryScreen() {
   }
 }
 
+void drawSDMenuScreen() {
+  display.fillRect(0, 11, 128, 45, SH110X_BLACK);
+  
+  display.setCursor(45, 0);
+  display.println("SD CARD");
+  
+  String menuItems[3] = {
+    "1. VIEW LOGS",
+    "2. CLEAR LOGS",
+    "3. SD CARD INFO"
+  };
+  
+  for (int i = 0; i < 3; i++) {
+    int yPos = 15 + (i * 12);
+    
+    display.fillRect(0, yPos - 1, 128, 12, SH110X_BLACK);
+    
+    if (i == sdMenuIndex) {
+      display.fillRect(0, yPos - 1, 128, 12, SH110X_WHITE);
+      display.setTextColor(SH110X_BLACK);
+    }
+    
+    display.setCursor(5, yPos);
+    display.print(menuItems[i]);
+    
+    if (i == sdMenuIndex) {
+      display.setTextColor(SH110X_WHITE);
+    }
+  }
+}
+
+void drawSDLogsScreen() {
+  display.fillRect(0, 11, 128, 45, SH110X_BLACK);
+  
+  display.setCursor(50, 0);
+  display.println("LOGS");
+  
+  if (sdLogCount == 0) {
+    readLogsFromSD();
+  }
+  
+  if (sdLogCount == 0) {
+    display.setCursor(30, 30);
+    display.println("NO LOGS");
+    return;
+  }
+  
+  int startIdx = (sdLogIndex / 3) * 3;
+  for (int i = 0; i < 3 && (startIdx + i) < sdLogCount; i++) {
+    int yPos = 15 + (i * 12);
+    int idx = startIdx + i;
+    
+    display.fillRect(0, yPos - 1, 128, 12, SH110X_BLACK);
+    
+    if (idx == sdLogIndex) {
+      display.fillRect(0, yPos - 1, 128, 12, SH110X_WHITE);
+      display.setTextColor(SH110X_BLACK);
+    }
+    
+    display.setCursor(2, yPos);
+    
+    String logEntry = sdLogs[idx];
+    if (logEntry.length() > 20) {
+      logEntry = logEntry.substring(0, 18) + "..";
+    }
+    display.print(logEntry);
+    
+    if (idx == sdLogIndex) {
+      display.setTextColor(SH110X_WHITE);
+    }
+  }
+}
+
+void drawRTCSetupScreen() {
+  display.fillRect(0, 11, 128, 45, SH110X_BLACK);
+  
+  display.setCursor(45, 0);
+  display.println("RTC SETUP");
+  
+  DateTime now = rtc.now();
+  DateTime adjusted = getAdjustedDateTime();
+  
+  display.setCursor(5, 20);
+  display.print("RTC Time: ");
+  display.printf("%02d:%02d", now.hour(), now.minute());
+  
+  display.setCursor(5, 32);
+  display.print("Adj Time: ");
+  display.printf("%02d:%02d", adjusted.hour(), adjusted.minute());
+  
+  display.setCursor(5, 44);
+  display.print("Adjustment: +");
+  display.print(RTC_TIME_ADJUST_MINUTES);
+  display.print(" min");
+  
+  display.setCursor(20, 55);
+  display.print("SEL=Adjust");
+}
+
 void drawAboutScreen() {
-  // Clear entire content area completely
   display.fillRect(0, 0, 128, 64, SH110X_BLACK);
   
   display.setCursor(45, 0);
@@ -1392,15 +1712,15 @@ void drawAboutScreen() {
   display.setCursor(20, 25);
   display.println("SMART ENROLL");
   display.setCursor(35, 35);
-  display.println("SYSTEM v3.2");
+  display.println("SYSTEM v3.3");
   
   display.setCursor(5, 50);
   display.print("Sensor: ");
   display.print(fingerprintInitialized ? "OK" : "ERR");
   
   display.setCursor(70, 50);
-  display.print("WiFi: ");
-  display.print(WiFi.status() == WL_CONNECTED ? "ON" : "OFF");
+  display.print("SD: ");
+  display.print(sdCardInitialized ? "OK" : "NO");
 }
 
 // =================== BUTTON HANDLING ===================
@@ -1456,6 +1776,7 @@ void handleLongPress(int button) {
   else if (currentScreen == SCREEN_ENROLL_MODE && button == 2 && enrollState == ENROLL_CAPTURING) {
     resetEnrollmentState();
     showNotificationMsg("Cancelled");
+    logToSD("Enrollment cancelled by user");
   }
 }
 
@@ -1471,14 +1792,16 @@ void handleButtonPress(int button) {
       break;
       
     case SCREEN_MAIN_MENU:
-      if (button == 0) menuIndex = (menuIndex > 0) ? menuIndex - 1 : 3;
-      else if (button == 1) menuIndex = (menuIndex < 3) ? menuIndex + 1 : 0;
+      if (button == 0) menuIndex = (menuIndex > 0) ? menuIndex - 1 : 5;
+      else if (button == 1) menuIndex = (menuIndex < 5) ? menuIndex + 1 : 0;
       else if (button == 2) {
         switch(menuIndex) {
           case 0: currentScreen = SCREEN_ENROLL_MODE; resetEnrollmentState(); break;
           case 1: currentScreen = SCREEN_WIFI_SCAN; wifiSelectedIndex = 0; scanWiFiNetworks(); break;
           case 2: currentScreen = SCREEN_NETWORK_STATUS; break;
-          case 3: currentScreen = SCREEN_ABOUT; break;
+          case 3: currentScreen = SCREEN_SD_MENU; sdMenuIndex = 0; break;
+          case 4: currentScreen = SCREEN_RTC_SETUP; break;
+          case 5: currentScreen = SCREEN_ABOUT; break;
         }
       } else if (button == 3) currentScreen = SCREEN_HOME;
       break;
@@ -1491,6 +1814,7 @@ void handleButtonPress(int button) {
           studentInProgress = true;
           enrollmentStartTime = millis();
           showNotificationMsg("Start!");
+          logToSD("Enrollment started for Roll: " + String(pendingStudentRoll));
         } else if (enrollState == ENROLL_ERROR) {
           enrollState = ENROLL_PENDING;
           showNotificationMsg("Retry");
@@ -1566,6 +1890,47 @@ void handleButtonPress(int button) {
       
     case SCREEN_NETWORK_STATUS:
       if (button == 3) {
+        currentScreen = SCREEN_MAIN_MENU;
+      }
+      break;
+      
+    case SCREEN_SD_MENU:
+      if (button == 0) sdMenuIndex = (sdMenuIndex > 0) ? sdMenuIndex - 1 : 2;
+      else if (button == 1) sdMenuIndex = (sdMenuIndex < 2) ? sdMenuIndex + 1 : 0;
+      else if (button == 2) {
+        switch(sdMenuIndex) {
+          case 0:
+            currentScreen = SCREEN_SD_LOGS;
+            sdLogIndex = 0;
+            readLogsFromSD();
+            break;
+          case 1:
+            clearSDLogs();
+            sdLogIndex = 0;
+            readLogsFromSD();
+            break;
+          case 2:
+            currentScreen = SCREEN_ABOUT;
+            break;
+        }
+      } else if (button == 3) {
+        currentScreen = SCREEN_MAIN_MENU;
+      }
+      break;
+      
+    case SCREEN_SD_LOGS:
+      if (button == 0) sdLogIndex = (sdLogIndex > 0) ? sdLogIndex - 1 : sdLogCount - 1;
+      else if (button == 1) sdLogIndex = (sdLogIndex < sdLogCount - 1) ? sdLogIndex + 1 : 0;
+      else if (button == 3) {
+        currentScreen = SCREEN_SD_MENU;
+      }
+      break;
+      
+    case SCREEN_RTC_SETUP:
+      if (button == 2) {
+        adjustRTC();
+        needRefresh = true;
+      } else if (button == 3) {
         currentScreen = SCREEN_MAIN_MENU;
       }
       break;
