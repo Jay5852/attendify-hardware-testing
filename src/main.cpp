@@ -1,678 +1,1310 @@
-/**
- * ESP32 TEST CODE - FINAL COMPLETE FIX
- * SH1106 OLED (128x64) + DS3231 RTC + 4 Buttons
+/*
+ * ============================================================
+ *  ATTENDIFY - PHASE 1 ESP32 FIRMWARE
+ *  Complete Attendance System with Fingerprint Authentication
+ * ============================================================
+ *  Hardware: ESP32-WROOM-32
+ *  Features: OLED UI, RTC, SD Card, Fingerprint, WiFi
+ *  Backend:  http://192.168.0.119:3002
+ * ============================================================
  */
 
+// ============================================================
+// LIBRARY INCLUDES
+// ============================================================
 #include <Wire.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SH110X.h>
-#include "RTClib.h"
+#include <RTClib.h>
+#include <Adafruit_Fingerprint.h>
+#include <SD.h>
+#include <SPI.h>
+#include <Preferences.h>
 
-// =================== PIN CONFIGURATION ===================
-#define OLED_SDA 21
-#define OLED_SCL 22
-#define BUTTON_UP 32
-#define BUTTON_DOWN 33
-#define BUTTON_SELECT 25
-#define BUTTON_BACK 26
+// ============================================================
+// PIN DEFINITIONS (FIXED - DO NOT CHANGE)
+// ============================================================
 
-// =================== DISPLAY CONSTANTS ===================
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_RESET -1
+// OLED Display (SH1106/SSD1306 - I2C)
+#define OLED_SDA        21
+#define OLED_SCL        22
+#define OLED_ADDRESS    0x3C
+#define SCREEN_WIDTH    128
+#define SCREEN_HEIGHT   64
 
-// =================== OLED SETUP ===================
-Adafruit_SH1106G display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+// RTC Module (DS3231 - I2C, shared bus)
+#define RTC_ADDRESS     0x68
 
-// =================== RTC SETUP ===================
-RTC_DS3231 rtc;
+// Fingerprint Sensor (R307 - UART)
+#define FP_TX           4
+#define FP_RX           2
+#define FP_BAUD         57600
 
-// =================== SCREEN STATE ENUM ===================
+// Navigation Buttons (INPUT_PULLUP)
+#define BTN_UP          32
+#define BTN_DOWN        33
+#define BTN_SELECT      25
+#define BTN_BACK        26
+
+// SD Card Module (SPI)
+#define SD_CS           5
+#define SD_MOSI         23
+#define SD_MISO         19
+#define SD_SCK          18
+
+// ============================================================
+// BACKEND CONFIGURATION
+// ============================================================
+#define BACKEND_HOST    "192.168.0.119"
+#define BACKEND_PORT    3002
+#define BACKEND_URL     "http://192.168.0.119:3002"
+
+// ============================================================
+// TIMING CONSTANTS
+// ============================================================
+#define POLL_INTERVAL       2000    // Poll backend every 2 seconds
+#define DEBOUNCE_DELAY      200     // Button debounce
+#define LONG_PRESS_TIME     1500    // Long press threshold
+#define WIFI_SCAN_INTERVAL  10000   // WiFi scan interval
+#define SCREEN_TIMEOUT      30000   // Screen timeout (not used in Phase 1)
+
+// ============================================================
+// SCREEN STATES (State Machine)
+// ============================================================
 enum ScreenState {
-  SCREEN_BOOT,
-  SCREEN_MAIN_MENU,
-  SCREEN_BUTTON_TEST,
-  SCREEN_SYSTEM_INFO,
-  SCREEN_SET_TIME,
-  SCREEN_RESET_MEM,
-  SCREEN_DEMO_MODE,
-  SCREEN_OLED_TEST,
-  SCREEN_RTC_TEST,
-  SCREEN_VOLT_TEST
+    SCREEN_BOOT,
+    SCREEN_HOME,
+    SCREEN_MAIN_MENU,
+    SCREEN_ENROLL_MODE,
+    SCREEN_ENROLL_WAITING,
+    SCREEN_ENROLL_FINGERPRINT,
+    SCREEN_ATTENDANCE_MODE,
+    SCREEN_WIFI_SCAN,
+    SCREEN_WIFI_STATUS,
+    SCREEN_ABOUT
 };
 
-// =================== GLOBAL VARIABLES ===================
+// ============================================================
+// ENROLLMENT STATES
+// ============================================================
+enum EnrollState {
+    ENROLL_IDLE,
+    ENROLL_POLLING,
+    ENROLL_STUDENT_FOUND,
+    ENROLL_WAITING_SELECT,
+    ENROLL_FIRST_SCAN,
+    ENROLL_REMOVE_FINGER,
+    ENROLL_SECOND_SCAN,
+    ENROLL_CREATE_MODEL,
+    ENROLL_STORE,
+    ENROLL_CONFIRM_BACKEND,
+    ENROLL_SUCCESS,
+    ENROLL_FAILED
+};
+
+// ============================================================
+// MENU DEFINITIONS
+// ============================================================
+const char* menuItems[] = {
+    "Enroll Mode",
+    "Attendance Mode",
+    "WiFi Scan",
+    "WiFi Status",
+    "About"
+};
+const int menuItemCount = 5;
+
+// ============================================================
+// GLOBAL OBJECTS
+// ============================================================
+Adafruit_SH1106G display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+RTC_DS3231 rtc;
+HardwareSerial fpSerial(2);
+Adafruit_Fingerprint finger(&fpSerial);
+Preferences preferences;
+
+// ============================================================
+// GLOBAL STATE VARIABLES
+// ============================================================
 ScreenState currentScreen = SCREEN_BOOT;
+EnrollState enrollState = ENROLL_IDLE;
 int menuIndex = 0;
-unsigned long lastButtonPress = 0;
-unsigned long lastUpdate = 0;
-bool needRefresh = true;
 
-// Button tracking
-int buttonPressCount[4] = {0, 0, 0, 0};
-bool buttonStates[4] = {false, false, false, false};
+// Button states
+bool btnUpPressed = false;
+bool btnDownPressed = false;
+bool btnSelectPressed = false;
+bool btnBackPressed = false;
+unsigned long btnSelectPressTime = 0;
 
-// Demo mode variables
-bool demoActive = false;
-unsigned long demoStartTime = 0;
-int demoCounter = 0;
+// Timing
+unsigned long lastPollTime = 0;
+unsigned long lastButtonTime = 0;
+unsigned long lastWifiScanTime = 0;
 
-// Test pattern variables
-int oledTestPattern = 0;
+// Enrollment data
+String enrollStudentName = "";
+String enrollStudentRoll = "";
+int enrollFingerprintId = 0;
 
-// =================== FUNCTION DECLARATIONS ===================
-void initializeHardware();
-void showScreen();
-void drawHeader();
-void drawFooter();
-void checkButtons();
-void handleButtonPress(int button);
+// System status
+bool wifiConnected = false;
+bool rtcAvailable = false;
+bool sdAvailable = false;
+bool fpAvailable = false;
+String currentWifiSSID = "";
 
-// Screen drawing functions
+// Attendance mode
+bool attendanceActive = false;
+
+// ============================================================
+// FUNCTION PROTOTYPES
+// ============================================================
+void initHardware();
+void initDisplay();
+void initRTC();
+void initSD();
+void initFingerprint();
+void scanAndConnectWifi();
+void handleButtons();
+void updateScreen();
 void drawBootScreen();
+void drawHomeScreen();
 void drawMainMenu();
-void drawButtonTest();
-void drawSystemInfo();
-void drawSetTime();
-void drawResetMem();
-void drawDemoMode();
-void drawOledTest();
-void drawRtcTest();
-void drawVoltTest();
+void drawEnrollMode();
+void drawEnrollWaiting();
+void drawEnrollFingerprint();
+void drawAttendanceMode();
+void drawWifiScan();
+void drawWifiStatus();
+void drawAboutScreen();
+void pollBackendForEnrollment();
+void handleEnrollmentFlow();
+void handleAttendanceFlow();
+void confirmEnrollmentToBackend();
+void uploadAttendanceToBackend(String roll, String timestamp);
+void saveAttendanceToSD(String roll, String timestamp, bool uploaded);
+String getTimestamp();
+int getFingerprintEnroll(int id);
+int getFingerprintMatch();
+void showMessage(const char* line1, const char* line2 = "", const char* line3 = "");
+void showError(const char* message);
+void showSuccess(const char* message);
+void handleUpButton();
+void handleDownButton();
+void handleSelectButton();
+void handleSelectLongPress();
+void handleBackButton();
 
-// =================== SETUP ===================
+// ============================================================
+// SETUP
+// ============================================================
 void setup() {
-  Serial.begin(115200);
-  Serial.println("\n=== ESP32 Attendance System Test ===");
-  
-  initializeHardware();
-  
-  currentScreen = SCREEN_BOOT;
-  showScreen();
-  delay(2000);
-  
-  currentScreen = SCREEN_MAIN_MENU;
+    Serial.begin(115200);
+    Serial.println("\n=== ATTENDIFY Phase 1 ===");
+    
+    initHardware();
 }
 
-// =================== INITIALIZE HARDWARE ===================
-void initializeHardware() {
-  Wire.begin(OLED_SDA, OLED_SCL);
-  Wire.setClock(100000);
-  
-  if (!display.begin(0x3C, OLED_RESET)) {
-    if (!display.begin(0x3D, OLED_RESET)) {
-      Serial.println("OLED not found!");
-      while(1);
-    }
-  }
-  
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SH110X_WHITE);
-  display.setRotation(0);
-  
-  if (!rtc.begin()) {
-    Serial.println("RTC not found!");
-  } else {
-    // Check if RTC lost power
-    if (rtc.lostPower()) {
-      Serial.println("RTC lost power, setting default time!");
-      // Set to a default time (Jan 19, 2026, 01:11:00)
-      rtc.adjust(DateTime(2026, 1, 19, 1, 11, 0));
-    }
-  }
-  
-  pinMode(BUTTON_UP, INPUT_PULLUP);
-  pinMode(BUTTON_DOWN, INPUT_PULLUP);
-  pinMode(BUTTON_SELECT, INPUT_PULLUP);
-  pinMode(BUTTON_BACK, INPUT_PULLUP);
-}
-
-// =================== MAIN LOOP ===================
+// ============================================================
+// MAIN LOOP (Non-blocking)
+// ============================================================
 void loop() {
-  checkButtons();
-  
-  if (millis() - lastUpdate > 100 || needRefresh) {
-    showScreen();
-    lastUpdate = millis();
-    needRefresh = false;
-  }
-  
-  if (currentScreen == SCREEN_DEMO_MODE && demoActive) {
-    if (millis() - demoStartTime > 1000) {
-      demoCounter++;
-      if (demoCounter > 99) demoCounter = 0;
-      demoStartTime = millis();
-      needRefresh = true;
-    }
-  }
-  
-  delay(10);
-}
-
-// =================== DISPLAY FUNCTIONS ===================
-void showScreen() {
-  display.clearDisplay();
-  drawHeader();
-  
-  // Draw main content
-  switch(currentScreen) {
-    case SCREEN_BOOT:
-      drawBootScreen();
-      break;
-    case SCREEN_MAIN_MENU:
-      drawMainMenu();
-      break;
-    case SCREEN_BUTTON_TEST:
-      drawButtonTest();
-      break;
-    case SCREEN_SYSTEM_INFO:
-      drawSystemInfo();
-      break;
-    case SCREEN_SET_TIME:
-      drawSetTime();
-      break;
-    case SCREEN_RESET_MEM:
-      drawResetMem();
-      break;
-    case SCREEN_DEMO_MODE:
-      drawDemoMode();
-      break;
-    case SCREEN_OLED_TEST:
-      drawOledTest();
-      break;
-    case SCREEN_RTC_TEST:
-      drawRtcTest();
-      break;
-    case SCREEN_VOLT_TEST:
-      drawVoltTest();
-      break;
-  }
-  
-  drawFooter();
-  display.display();
-}
-
-void drawHeader() {
-  // Top line: Screen title
-  display.setCursor(0, 0);
-  
-  switch(currentScreen) {
-    case SCREEN_SYSTEM_INFO:
-      display.print("TEST 9-95  1 MHz/911.11");
-      break;
-    case SCREEN_SET_TIME:
-      display.print("TEST SET TIME");
-      break;
-    case SCREEN_RESET_MEM:
-      display.print("TEST RESET MEM");
-      break;
-    case SCREEN_DEMO_MODE:
-      if (demoActive) {
-        display.print("TEST DETECT MODE: 22");
-      } else {
-        display.print("TEST DETECT MODE: 1/1");
-      }
-      break;
-    case SCREEN_OLED_TEST:
-      display.print("TEST");
-      break;
-    case SCREEN_RTC_TEST:
-      display.print("SELECT 10.0K1-2006");
-      break;
-    case SCREEN_VOLT_TEST:
-      display.print("TEST");
-      break;
-    default:
-      display.print("TEST");
-  }
-  
-  // Show time on right for most screens
-  if (rtc.begin()) {
-    DateTime now = rtc.now();
+    // Handle button inputs
+    handleButtons();
     
-    // Check which screens should show time
-    bool showTime = true;
-    switch(currentScreen) {
-      case SCREEN_SYSTEM_INFO:
-      case SCREEN_SET_TIME:
-      case SCREEN_DEMO_MODE:
-      case SCREEN_RTC_TEST:
-        showTime = false;
-        break;
-      default:
-        showTime = true;
+    // Update display based on current screen
+    updateScreen();
+    
+    // Handle enrollment flow if active
+    if (currentScreen == SCREEN_ENROLL_MODE || 
+        currentScreen == SCREEN_ENROLL_WAITING ||
+        currentScreen == SCREEN_ENROLL_FINGERPRINT) {
+        handleEnrollmentFlow();
     }
     
-    if (showTime) {
-      display.setCursor(85, 0);
-      display.printf("%02d:%02d", now.hour(), now.minute());
+    // Handle attendance flow if active
+    if (currentScreen == SCREEN_ATTENDANCE_MODE && attendanceActive) {
+        handleAttendanceFlow();
     }
-  }
-  
-  display.drawLine(0, 9, 127, 9, SH110X_WHITE);
+    
+    // Small delay to prevent watchdog issues
+    delay(10);
 }
 
-void drawFooter() {
-  display.setCursor(0, 56);
-  
-  switch(currentScreen) {
-    case SCREEN_SYSTEM_INFO:
-      display.print("GND VCC SCL SON");
-      break;
-    case SCREEN_SET_TIME:
-      display.print("GND UCC SCL SON");
-      break;
-    case SCREEN_RESET_MEM:
-      display.print("GND UCC SCL SM");
-      break;
-    case SCREEN_DEMO_MODE:
-      if (demoActive) {
-        display.print("GND UCC SCL SON");
-      } else {
-        display.print("GND VCC SCL SON");
-      }
-      break;
-    case SCREEN_OLED_TEST:
-      switch(oledTestPattern) {
-        case 0:
-          display.print("SELECT EMP: 1/3");
-          break;
-        case 1:
-          display.print("SELECT BRK: 2/3");
-          break;
-        case 2:
-          display.print("SELECT BAR#: 3/3");
-          break;
-      }
-      break;
-    case SCREEN_BUTTON_TEST:
-      display.print("GND VCC SCL SOA");
-      break;
-    case SCREEN_VOLT_TEST:
-      display.print("GND UCC SOL 500V");
-      break;
-    case SCREEN_MAIN_MENU:
-      // Smaller up/down select hint
-      display.print("U/D SEL");
-      break;
-    default:
-      // Empty footer for other screens
-      display.print("");
-  }
+// ============================================================
+// HARDWARE INITIALIZATION
+// ============================================================
+void initHardware() {
+    // Initialize I2C
+    Wire.begin(OLED_SDA, OLED_SCL);
+    
+    // Initialize buttons
+    pinMode(BTN_UP, INPUT_PULLUP);
+    pinMode(BTN_DOWN, INPUT_PULLUP);
+    pinMode(BTN_SELECT, INPUT_PULLUP);
+    pinMode(BTN_BACK, INPUT_PULLUP);
+    
+    // Initialize display first for status messages
+    initDisplay();
+    currentScreen = SCREEN_BOOT;
+    drawBootScreen();
+    
+    // Initialize other hardware
+    showMessage("Initializing...", "RTC Module");
+    initRTC();
+    delay(500);
+    
+    showMessage("Initializing...", "SD Card");
+    initSD();
+    delay(500);
+    
+    showMessage("Initializing...", "Fingerprint");
+    initFingerprint();
+    delay(500);
+    
+    showMessage("Scanning...", "Open WiFi Networks");
+    scanAndConnectWifi();
+    delay(1000);
+    
+    // Boot complete
+    currentScreen = SCREEN_HOME;
 }
 
-// =================== SCREEN DRAWING FUNCTIONS ===================
+// ============================================================
+// DISPLAY INITIALIZATION
+// ============================================================
+bool displayAvailable = false;
+
+void initDisplay() {
+    if (!display.begin(OLED_ADDRESS, true)) {
+        Serial.println("ERROR: OLED not found! Continuing without display...");
+        displayAvailable = false;
+        return;  // Don't halt, continue without display
+    }
+    displayAvailable = true;
+    display.clearDisplay();
+    display.setTextColor(SH110X_WHITE);
+    display.setTextSize(1);
+    display.display();
+    Serial.println("OLED initialized");
+}
+
+// ============================================================
+// RTC INITIALIZATION
+// ============================================================
+void initRTC() {
+    if (!rtc.begin()) {
+        Serial.println("ERROR: RTC not found!");
+        rtcAvailable = false;
+    } else {
+        rtcAvailable = true;
+        if (rtc.lostPower()) {
+            Serial.println("RTC lost power, setting time...");
+            rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+        }
+        Serial.println("RTC initialized");
+    }
+}
+
+// ============================================================
+// SD CARD INITIALIZATION
+// ============================================================
+void initSD() {
+    SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+    
+    if (!SD.begin(SD_CS)) {
+        Serial.println("ERROR: SD Card not found!");
+        sdAvailable = false;
+    } else {
+        sdAvailable = true;
+        Serial.println("SD Card initialized");
+        
+        // Create attendance directory if not exists
+        if (!SD.exists("/attendance")) {
+            SD.mkdir("/attendance");
+        }
+    }
+}
+
+// ============================================================
+// FINGERPRINT SENSOR INITIALIZATION
+// ============================================================
+void initFingerprint() {
+    fpSerial.begin(FP_BAUD, SERIAL_8N1, FP_RX, FP_TX);
+    finger.begin(FP_BAUD);
+    
+    if (finger.verifyPassword()) {
+        fpAvailable = true;
+        Serial.println("Fingerprint sensor initialized");
+        Serial.print("Sensor contains ");
+        Serial.print(finger.templateCount);
+        Serial.println(" templates");
+    } else {
+        fpAvailable = false;
+        Serial.println("ERROR: Fingerprint sensor not found!");
+    }
+}
+
+// ============================================================
+// WIFI - SCAN AND CONNECT TO OPEN NETWORKS
+// ============================================================
+void scanAndConnectWifi() {
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    delay(100);
+    
+    Serial.println("Scanning for open WiFi networks...");
+    
+    int networkCount = WiFi.scanNetworks();
+    
+    if (networkCount == 0) {
+        Serial.println("No networks found");
+        wifiConnected = false;
+        return;
+    }
+    
+    // Find open networks (no encryption)
+    for (int i = 0; i < networkCount; i++) {
+        if (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) {
+            String ssid = WiFi.SSID(i);
+            Serial.print("Found open network: ");
+            Serial.println(ssid);
+            
+            showMessage("Connecting to:", ssid.c_str());
+            
+            WiFi.begin(ssid.c_str());
+            
+            int attempts = 0;
+            while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+                delay(500);
+                Serial.print(".");
+                attempts++;
+            }
+            
+            if (WiFi.status() == WL_CONNECTED) {
+                wifiConnected = true;
+                currentWifiSSID = ssid;
+                Serial.println("\nConnected!");
+                Serial.print("IP: ");
+                Serial.println(WiFi.localIP());
+                showMessage("Connected!", ssid.c_str(), WiFi.localIP().toString().c_str());
+                delay(1000);
+                return;
+            }
+        }
+    }
+    
+    wifiConnected = false;
+    Serial.println("No open networks available");
+    showMessage("No open WiFi", "networks found");
+    delay(2000);
+}
+
+// ============================================================
+// BUTTON HANDLING (Non-blocking with debounce)
+// ============================================================
+void handleButtons() {
+    unsigned long currentTime = millis();
+    
+    // Debounce check
+    if (currentTime - lastButtonTime < DEBOUNCE_DELAY) {
+        return;
+    }
+    
+    // Read button states (active LOW due to INPUT_PULLUP)
+    bool upState = !digitalRead(BTN_UP);
+    bool downState = !digitalRead(BTN_DOWN);
+    bool selectState = !digitalRead(BTN_SELECT);
+    bool backState = !digitalRead(BTN_BACK);
+    
+    // UP Button
+    if (upState && !btnUpPressed) {
+        btnUpPressed = true;
+        lastButtonTime = currentTime;
+        handleUpButton();
+    } else if (!upState) {
+        btnUpPressed = false;
+    }
+    
+    // DOWN Button
+    if (downState && !btnDownPressed) {
+        btnDownPressed = true;
+        lastButtonTime = currentTime;
+        handleDownButton();
+    } else if (!downState) {
+        btnDownPressed = false;
+    }
+    
+    // SELECT Button
+    if (selectState && !btnSelectPressed) {
+        btnSelectPressed = true;
+        btnSelectPressTime = currentTime;
+        lastButtonTime = currentTime;
+    } else if (!selectState && btnSelectPressed) {
+        btnSelectPressed = false;
+        unsigned long pressDuration = currentTime - btnSelectPressTime;
+        if (pressDuration >= LONG_PRESS_TIME) {
+            handleSelectLongPress();
+        } else {
+            handleSelectButton();
+        }
+    }
+    
+    // BACK Button
+    if (backState && !btnBackPressed) {
+        btnBackPressed = true;
+        lastButtonTime = currentTime;
+        handleBackButton();
+    } else if (!backState) {
+        btnBackPressed = false;
+    }
+}
+
+void handleUpButton() {
+    switch (currentScreen) {
+        case SCREEN_MAIN_MENU:
+            menuIndex = (menuIndex - 1 + menuItemCount) % menuItemCount;
+            break;
+        default:
+            break;
+    }
+}
+
+void handleDownButton() {
+    switch (currentScreen) {
+        case SCREEN_MAIN_MENU:
+            menuIndex = (menuIndex + 1) % menuItemCount;
+            break;
+        default:
+            break;
+    }
+}
+
+void handleSelectButton() {
+    switch (currentScreen) {
+        case SCREEN_HOME:
+            currentScreen = SCREEN_MAIN_MENU;
+            menuIndex = 0;
+            break;
+            
+        case SCREEN_MAIN_MENU:
+            switch (menuIndex) {
+                case 0: // Enroll Mode
+                    currentScreen = SCREEN_ENROLL_MODE;
+                    enrollState = ENROLL_POLLING;
+                    break;
+                case 1: // Attendance Mode
+                    currentScreen = SCREEN_ATTENDANCE_MODE;
+                    attendanceActive = true;
+                    break;
+                case 2: // WiFi Scan
+                    currentScreen = SCREEN_WIFI_SCAN;
+                    scanAndConnectWifi();
+                    currentScreen = SCREEN_WIFI_STATUS;
+                    break;
+                case 3: // WiFi Status
+                    currentScreen = SCREEN_WIFI_STATUS;
+                    break;
+                case 4: // About
+                    currentScreen = SCREEN_ABOUT;
+                    break;
+            }
+            break;
+            
+        case SCREEN_ENROLL_WAITING:
+            // Teacher presses SELECT to start fingerprint capture
+            if (enrollState == ENROLL_WAITING_SELECT) {
+                enrollState = ENROLL_FIRST_SCAN;
+                currentScreen = SCREEN_ENROLL_FINGERPRINT;
+            }
+            break;
+            
+        default:
+            break;
+    }
+}
+
+void handleSelectLongPress() {
+    // Long press actions (for future use)
+}
+
+void handleBackButton() {
+    switch (currentScreen) {
+        case SCREEN_MAIN_MENU:
+            currentScreen = SCREEN_HOME;
+            break;
+            
+        case SCREEN_ENROLL_MODE:
+        case SCREEN_ENROLL_WAITING:
+        case SCREEN_ENROLL_FINGERPRINT:
+            enrollState = ENROLL_IDLE;
+            enrollStudentName = "";
+            enrollStudentRoll = "";
+            currentScreen = SCREEN_MAIN_MENU;
+            break;
+            
+        case SCREEN_ATTENDANCE_MODE:
+            attendanceActive = false;
+            currentScreen = SCREEN_MAIN_MENU;
+            break;
+            
+        case SCREEN_WIFI_SCAN:
+        case SCREEN_WIFI_STATUS:
+        case SCREEN_ABOUT:
+            currentScreen = SCREEN_MAIN_MENU;
+            break;
+            
+        default:
+            currentScreen = SCREEN_HOME;
+            break;
+    }
+}
+
+// ============================================================
+// SCREEN UPDATE (Non-blocking)
+// ============================================================
+void updateScreen() {
+    switch (currentScreen) {
+        case SCREEN_BOOT:
+            drawBootScreen();
+            break;
+        case SCREEN_HOME:
+            drawHomeScreen();
+            break;
+        case SCREEN_MAIN_MENU:
+            drawMainMenu();
+            break;
+        case SCREEN_ENROLL_MODE:
+            drawEnrollMode();
+            break;
+        case SCREEN_ENROLL_WAITING:
+            drawEnrollWaiting();
+            break;
+        case SCREEN_ENROLL_FINGERPRINT:
+            drawEnrollFingerprint();
+            break;
+        case SCREEN_ATTENDANCE_MODE:
+            drawAttendanceMode();
+            break;
+        case SCREEN_WIFI_SCAN:
+            drawWifiScan();
+            break;
+        case SCREEN_WIFI_STATUS:
+            drawWifiStatus();
+            break;
+        case SCREEN_ABOUT:
+            drawAboutScreen();
+            break;
+    }
+}
+
+// ============================================================
+// SCREEN DRAWING FUNCTIONS
+// ============================================================
+
 void drawBootScreen() {
-  display.setCursor(25, 20);
-  display.setTextSize(2);
-  display.println("SYSTEM");
-  display.setCursor(40, 40);
-  display.println("TEST");
-  display.setTextSize(1);
+    if (!displayAvailable) return;
+    display.clearDisplay();
+    display.setTextSize(2);
+    display.setCursor(10, 10);
+    display.println("ATTENDIFY");
+    display.setTextSize(1);
+    display.setCursor(30, 35);
+    display.println("Phase 1");
+    display.setCursor(20, 50);
+    display.println("Initializing...");
+    display.display();
+}
+
+void drawHomeScreen() {
+    if (!displayAvailable) return;
+    display.clearDisplay();
+    
+    // Header
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.println("ATTENDIFY");
+    display.drawLine(0, 10, 128, 10, SH110X_WHITE);
+    
+    // Status icons
+    display.setCursor(0, 16);
+    display.print("WiFi: ");
+    display.println(wifiConnected ? "OK" : "OFF");
+    
+    display.print("RTC:  ");
+    display.println(rtcAvailable ? "OK" : "ERR");
+    
+    display.print("SD:   ");
+    display.println(sdAvailable ? "OK" : "ERR");
+    
+    display.print("FP:   ");
+    display.println(fpAvailable ? "OK" : "ERR");
+    
+    // Current time
+    if (rtcAvailable) {
+        DateTime now = rtc.now();
+        display.setCursor(70, 16);
+        char timeStr[9];
+        sprintf(timeStr, "%02d:%02d:%02d", now.hour(), now.minute(), now.second());
+        display.println(timeStr);
+    }
+    
+    // Navigation hint
+    display.setCursor(0, 56);
+    display.println("[SELECT] - Menu");
+    
+    display.display();
 }
 
 void drawMainMenu() {
-  // Show "MENU" centered
-  display.setCursor(50, 12);
-  display.println("MENU");
-  
-  display.drawLine(0, 25, 127, 25, SH110X_WHITE);
-  
-  const char* menuItems[] = {
-    "BUTTON TEST",
-    "SYS INFO",
-    "SET TIME",
-    "MEM RESET",
-    "DEMO MODE",
-    "OLED TEST",
-    "RTC TEST",
-    "VOLT TEST"
-  };
-  
-  // Show only 3 menu items at a time
-  int startIdx = 0;
-  if (menuIndex > 2) startIdx = menuIndex - 2;
-  if (menuIndex > 5) startIdx = menuIndex - 1;
-  
-  for (int i = 0; i < 3; i++) {
-    int idx = startIdx + i;
-    if (idx >= 8) break;
+    if (!displayAvailable) return;
+    display.clearDisplay();
     
-    int yPos = 28 + (i * 10);
-    
-    // Clear line area
-    display.fillRect(0, yPos - 1, 128, 9, SH110X_BLACK);
-    
-    if (idx == menuIndex) {
-      display.fillRect(0, yPos - 1, 128, 9, SH110X_WHITE);
-      display.setTextColor(SH110X_BLACK);
-    }
-    
-    display.setCursor(15, yPos);
-    display.print(menuItems[idx]);
-    
-    if (idx == menuIndex) {
-      display.setTextColor(SH110X_WHITE);
-    }
-  }
-  
-  // Scroll indicators (small arrows)
-  if (menuIndex > 0) {
-    display.setCursor(120, 30);
-    display.print("^");
-  }
-  if (menuIndex < 7) {
-    display.setCursor(120, 45);
-    display.print("v");
-  }
-}
-
-void drawButtonTest() {
-  // Clear content area
-  display.fillRect(0, 10, 128, 46, SH110X_BLACK);
-  
-  // From image: Shows "9E6045A0" at top
-  display.setCursor(10, 12);
-  display.println("9E6045A0");
-  
-  // Show multiple LED lines (limited to fit screen)
-  for (int i = 0; i < 11; i++) {
-    int yPos = 20 + (i * 8);
-    if (yPos < 55) {
-      display.setCursor(20, yPos);
-      display.println("LED");
-    }
-  }
-  
-  // Show RED at the bottom
-  display.setCursor(20, 48);
-  display.println("RED");
-  
-  // Show button states in small text at top right
-  display.setCursor(90, 12);
-  display.print("BTN:");
-  for (int i = 0; i < 4; i++) {
-    display.setCursor(90 + (i * 8), 20);
-    display.print(buttonStates[i] ? "1" : "0");
-  }
-}
-
-void drawSystemInfo() {
-  // Clear content area
-  display.fillRect(0, 10, 128, 46, SH110X_BLACK);
-  
-  // From image: Shows system info lines
-  display.setCursor(10, 15);
-  display.println("CHFP: E5F2E-0019-03");
-  
-  display.setCursor(10, 25);
-  display.println("CPU: 2.4GHz");
-  
-  display.setCursor(10, 35);
-  display.println("RMI: 3.2KB/s");
-  
-  display.setCursor(10, 45);
-  display.println("BFCMSH: 4MB");
-}
-
-void drawSetTime() {
-  // Clear content area
-  display.fillRect(0, 10, 128, 46, SH110X_BLACK);
-  
-  // From image: Shows "PRESS SELECT TO" and time
-  display.setCursor(15, 25);
-  display.println("PRESS SELECT TO");
-  
-  if (rtc.begin()) {
-    DateTime now = rtc.now();
-    display.setCursor(40, 40);
-    display.print("NOW: ");
-    display.printf("%02d:%02d", now.hour(), now.minute());
-  } else {
-    display.setCursor(40, 40);
-    display.print("NOW: 01:11");
-  }
-}
-
-void drawResetMem() {
-  // Clear content area
-  display.fillRect(0, 10, 128, 46, SH110X_BLACK);
-  
-  // From image: Shows "PRESS SELECT to" and "RESET" text
-  display.setCursor(15, 25);
-  display.println("PRESS SELECT to");
-  
-  display.setCursor(30, 40);
-  display.println("RESET");
-}
-
-void drawDemoMode() {
-  // Clear content area
-  display.fillRect(0, 10, 128, 46, SH110X_BLACK);
-  
-  if (demoActive) {
-    // Active mode: Show counter and "S/F IQ TESTING"
-    display.setCursor(10, 20);
-    display.println("S/F IQ TESTING");
-    
-    display.setCursor(15, 40);
-    display.println("Press SELECT to");
-    display.setCursor(45, 50);
-    display.println("DEmO mode");
-  } else {
-    // Inactive mode: Show "S-FE JET 1.0-7H-1" and "PRESS SELECT TO"
-    display.setCursor(10, 20);
-    display.println("S-FE JET 1.0-7H-1");
-    
-    display.setCursor(15, 40);
-    display.println("PRESS SELECT TO");
-  }
-}
-
-void drawOledTest() {
-  // Clear content area
-  display.fillRect(0, 10, 128, 46, SH110X_BLACK);
-  
-  // Draw a line below header
-  display.drawLine(0, 15, 127, 15, SH110X_WHITE);
-  
-  // Show "OLED TEST" below the line (centered)
-  display.setCursor(40, 20);
-  display.println("OLED TEST");
-  
-  switch(oledTestPattern) {
-    case 0:
-      // Pattern 1: Shows "BJT2" as in image
-      display.setCursor(50, 35);
-      display.println("BJT2");
-      break;
-      
-    case 1:
-      // Pattern 2: Grid pattern
-      for (int x = 20; x < 110; x += 20) {
-        display.drawLine(x, 30, x, 50, SH110X_WHITE);
-      }
-      for (int y = 30; y < 55; y += 10) {
-        display.drawLine(20, y, 100, y, SH110X_WHITE);
-      }
-      break;
-      
-    case 2:
-      // Pattern 3: Text pattern from image
-      display.setCursor(10, 30);
-      display.println("12345678910#");
-      display.setCursor(10, 40);
-      display.println("ABCDEFGHIJKL");
-      break;
-  }
-}
-
-void drawRtcTest() {
-  // Clear content area
-  display.fillRect(0, 10, 128, 46, SH110X_BLACK);
-  
-  // Draw a line below header
-  display.drawLine(0, 15, 127, 15, SH110X_WHITE);
-  
-  // Show "RTC TEST" below the line (centered)
-  display.setCursor(40, 20);
-  display.println("RTC TEST");
-  
-  if (rtc.begin()) {
-    DateTime now = rtc.now();
-    display.setCursor(40, 40);
-    display.setTextSize(2);
-    display.printf("%02d:%02d", now.hour(), now.minute());
+    // Header
     display.setTextSize(1);
-  } else {
-    display.setCursor(35, 40);
-    display.println("NO RTC");
-  }
-}
-
-void drawVoltTest() {
-  // Clear content area
-  display.fillRect(0, 10, 128, 46, SH110X_BLACK);
-  
-  // Show voltage value "9999.99" in large font
-  display.setCursor(30, 25);
-  display.setTextSize(2);
-  display.println("9999.99");
-  display.setTextSize(1);
-}
-
-// =================== BUTTON HANDLING ===================
-void checkButtons() {
-  bool upNow = (digitalRead(BUTTON_UP) == LOW);
-  bool downNow = (digitalRead(BUTTON_DOWN) == LOW);
-  bool selectNow = (digitalRead(BUTTON_SELECT) == LOW);
-  bool backNow = (digitalRead(BUTTON_BACK) == LOW);
-  
-  if (millis() - lastButtonPress < 200) return;
-  
-  if (upNow && !buttonStates[0]) {
-    buttonStates[0] = true;
-    buttonPressCount[0]++;
-    handleButtonPress(0);
-  } else if (!upNow) buttonStates[0] = false;
-  
-  if (downNow && !buttonStates[1]) {
-    buttonStates[1] = true;
-    buttonPressCount[1]++;
-    handleButtonPress(1);
-  } else if (!downNow) buttonStates[1] = false;
-  
-  if (selectNow && !buttonStates[2]) {
-    buttonStates[2] = true;
-    buttonPressCount[2]++;
-    handleButtonPress(2);
-  } else if (!selectNow) buttonStates[2] = false;
-  
-  if (backNow && !buttonStates[3]) {
-    buttonStates[3] = true;
-    buttonPressCount[3]++;
-    handleButtonPress(3);
-  } else if (!backNow) buttonStates[3] = false;
-}
-
-void handleButtonPress(int button) {
-  lastButtonPress = millis();
-  needRefresh = true;
-  
-  switch(currentScreen) {
-    case SCREEN_MAIN_MENU:
-      if (button == 0) {
-        menuIndex = (menuIndex > 0) ? menuIndex - 1 : 7;
-      } else if (button == 1) {
-        menuIndex = (menuIndex < 7) ? menuIndex + 1 : 0;
-      } else if (button == 2) {
-        switch(menuIndex) {
-          case 0: currentScreen = SCREEN_BUTTON_TEST; break;
-          case 1: currentScreen = SCREEN_SYSTEM_INFO; break;
-          case 2: currentScreen = SCREEN_SET_TIME; break;
-          case 3: currentScreen = SCREEN_RESET_MEM; break;
-          case 4: currentScreen = SCREEN_DEMO_MODE; break;
-          case 5: currentScreen = SCREEN_OLED_TEST; break;
-          case 6: currentScreen = SCREEN_RTC_TEST; break;
-          case 7: currentScreen = SCREEN_VOLT_TEST; break;
+    display.setCursor(30, 0);
+    display.println("MAIN MENU");
+    display.drawLine(0, 10, 128, 10, SH110X_WHITE);
+    
+    // Menu items
+    for (int i = 0; i < menuItemCount; i++) {
+        display.setCursor(10, 16 + (i * 10));
+        if (i == menuIndex) {
+            display.print("> ");
+        } else {
+            display.print("  ");
         }
-      }
-      break;
-      
-    case SCREEN_BUTTON_TEST:
-    case SCREEN_SYSTEM_INFO:
-    case SCREEN_RTC_TEST:
-    case SCREEN_VOLT_TEST:
-      if (button == 3) currentScreen = SCREEN_MAIN_MENU;
-      break;
-      
-    case SCREEN_SET_TIME:
-      if (button == 2) {
-        if (rtc.begin()) {
-          // FIXED: Get current PC time via Serial for accuracy
-          Serial.println("Setting RTC to PC time...");
-          
-          // Get compile time as fallback
-          DateTime compileTime = DateTime(F(__DATE__), F(__TIME__));
-          
-          // Calculate current time by adding elapsed milliseconds
-          // This is more accurate than just compile time
-          unsigned long currentSeconds = compileTime.unixtime() + (millis() / 1000);
-          DateTime currentTime = DateTime(currentSeconds);
-          
-          // Set RTC to calculated current time
-          rtc.adjust(currentTime);
-          
-          display.clearDisplay();
-          display.setCursor(30, 30);
-          display.println("TIME SYNCED");
-          display.display();
-          delay(1000);
-        }
-      } else if (button == 3) {
-        currentScreen = SCREEN_MAIN_MENU;
-      }
-      break;
-      
-    case SCREEN_RESET_MEM:
-      if (button == 2) {
-        for (int i = 0; i < 4; i++) buttonPressCount[i] = 0;
-        demoCounter = 0;
-        demoActive = false;
+        display.println(menuItems[i]);
+    }
+    
+    display.display();
+}
+
+void drawEnrollMode() {
+    if (!displayAvailable) return;
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(20, 0);
+    display.println("ENROLL MODE");
+    display.drawLine(0, 10, 128, 10, SH110X_WHITE);
+    
+    display.setCursor(0, 20);
+    display.println("Waiting for student");
+    display.println("from QR page...");
+    
+    display.setCursor(0, 45);
+    display.println("Polling backend...");
+    
+    display.setCursor(0, 56);
+    display.println("[BACK] - Cancel");
+    
+    display.display();
+}
+
+void drawEnrollWaiting() {
+    if (!displayAvailable) return;
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(20, 0);
+    display.println("ENROLL MODE");
+    display.drawLine(0, 10, 128, 10, SH110X_WHITE);
+    
+    display.setCursor(0, 16);
+    display.println("Student Found:");
+    
+    display.setTextSize(1);
+    display.setCursor(0, 28);
+    display.print("Name: ");
+    display.println(enrollStudentName.substring(0, 12));
+    
+    display.setCursor(0, 40);
+    display.print("Roll: ");
+    display.println(enrollStudentRoll);
+    
+    display.setCursor(0, 56);
+    display.println("[SELECT] Start Enroll");
+    
+    display.display();
+}
+
+void drawEnrollFingerprint() {
+    if (!displayAvailable) return;
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(15, 0);
+    display.println("FINGERPRINT");
+    display.drawLine(0, 10, 128, 10, SH110X_WHITE);
+    
+    display.setCursor(0, 20);
+    
+    switch (enrollState) {
+        case ENROLL_FIRST_SCAN:
+            display.println("Place finger on");
+            display.println("sensor for 1st scan");
+            break;
+        case ENROLL_REMOVE_FINGER:
+            display.println("Remove finger...");
+            break;
+        case ENROLL_SECOND_SCAN:
+            display.println("Place same finger");
+            display.println("for 2nd scan");
+            break;
+        case ENROLL_CREATE_MODEL:
+            display.println("Creating model...");
+            break;
+        case ENROLL_STORE:
+            display.println("Storing fingerprint");
+            display.print("ID: ");
+            display.println(enrollFingerprintId);
+            break;
+        case ENROLL_CONFIRM_BACKEND:
+            display.println("Confirming with");
+            display.println("backend...");
+            break;
+        case ENROLL_SUCCESS:
+            display.println("ENROLLMENT SUCCESS!");
+            display.setCursor(0, 40);
+            display.print("ID: ");
+            display.println(enrollFingerprintId);
+            break;
+        case ENROLL_FAILED:
+            display.println("ENROLLMENT FAILED!");
+            display.println("Please try again.");
+            break;
+        default:
+            break;
+    }
+    
+    display.display();
+}
+
+void drawAttendanceMode() {
+    if (!displayAvailable) return;
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(10, 0);
+    display.println("ATTENDANCE MODE");
+    display.drawLine(0, 10, 128, 10, SH110X_WHITE);
+    
+    display.setCursor(0, 20);
+    display.println("Place registered");
+    display.println("finger on sensor");
+    display.println("to mark attendance");
+    
+    // Show time
+    if (rtcAvailable) {
+        DateTime now = rtc.now();
+        display.setCursor(0, 45);
+        char timeStr[20];
+        sprintf(timeStr, "%02d/%02d %02d:%02d:%02d", 
+                now.day(), now.month(), now.hour(), now.minute(), now.second());
+        display.println(timeStr);
+    }
+    
+    display.setCursor(0, 56);
+    display.println("[BACK] - Exit");
+    
+    display.display();
+}
+
+void drawWifiScan() {
+    if (!displayAvailable) return;
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(20, 0);
+    display.println("WIFI SCAN");
+    display.drawLine(0, 10, 128, 10, SH110X_WHITE);
+    
+    display.setCursor(0, 25);
+    display.println("Scanning for open");
+    display.println("WiFi networks...");
+    
+    display.display();
+}
+
+void drawWifiStatus() {
+    if (!displayAvailable) return;
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(15, 0);
+    display.println("WIFI STATUS");
+    display.drawLine(0, 10, 128, 10, SH110X_WHITE);
+    
+    display.setCursor(0, 16);
+    display.print("Status: ");
+    display.println(wifiConnected ? "Connected" : "Disconnected");
+    
+    if (wifiConnected) {
+        display.print("SSID: ");
+        display.println(currentWifiSSID.substring(0, 12));
         
-        display.clearDisplay();
-        display.setCursor(40, 30);
-        display.println("RESET DONE");
-        display.display();
-        delay(1000);
-      } else if (button == 3) {
-        currentScreen = SCREEN_MAIN_MENU;
-      }
-      break;
-      
-    case SCREEN_DEMO_MODE:
-      if (button == 2) {
-        demoActive = !demoActive;
-        if (demoActive) {
-          demoStartTime = millis();
-          demoCounter = 0;
+        display.print("IP: ");
+        display.println(WiFi.localIP());
+        
+        display.print("RSSI: ");
+        display.print(WiFi.RSSI());
+        display.println(" dBm");
+    } else {
+        display.setCursor(0, 35);
+        display.println("No open network");
+        display.println("connected.");
+    }
+    
+    display.setCursor(0, 56);
+    display.println("[BACK] - Return");
+    
+    display.display();
+}
+
+void drawAboutScreen() {
+    if (!displayAvailable) return;
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(35, 0);
+    display.println("ABOUT");
+    display.drawLine(0, 10, 128, 10, SH110X_WHITE);
+    
+    display.setCursor(0, 16);
+    display.println("ATTENDIFY v1.0");
+    display.println("Phase 1 - Local");
+    display.println("");
+    display.println("Fingerprint-based");
+    display.println("Attendance System");
+    
+    display.setCursor(0, 56);
+    display.println("[BACK] - Return");
+    
+    display.display();
+}
+
+// ============================================================
+// ENROLLMENT FLOW HANDLER
+// ============================================================
+void handleEnrollmentFlow() {
+    unsigned long currentTime = millis();
+    
+    switch (enrollState) {
+        case ENROLL_POLLING:
+            // Poll backend every 2 seconds
+            if (currentTime - lastPollTime >= POLL_INTERVAL) {
+                lastPollTime = currentTime;
+                pollBackendForEnrollment();
+            }
+            break;
+            
+        case ENROLL_STUDENT_FOUND:
+            // Transition to waiting for SELECT press
+            currentScreen = SCREEN_ENROLL_WAITING;
+            enrollState = ENROLL_WAITING_SELECT;
+            break;
+            
+        case ENROLL_FIRST_SCAN:
+            // First fingerprint scan
+            {
+                int result = finger.getImage();
+                if (result == FINGERPRINT_OK) {
+                    result = finger.image2Tz(1);
+                    if (result == FINGERPRINT_OK) {
+                        enrollState = ENROLL_REMOVE_FINGER;
+                        showMessage("Good!", "Remove finger");
+                        delay(1000);
+                    } else {
+                        showError("Image convert failed");
+                        delay(2000);
+                    }
+                } else if (result == FINGERPRINT_NOFINGER) {
+                    // Keep waiting
+                }
+            }
+            break;
+            
+        case ENROLL_REMOVE_FINGER:
+            // Wait for finger removal
+            if (finger.getImage() == FINGERPRINT_NOFINGER) {
+                delay(500);
+                enrollState = ENROLL_SECOND_SCAN;
+            }
+            break;
+            
+        case ENROLL_SECOND_SCAN:
+            // Second fingerprint scan
+            {
+                int result = finger.getImage();
+                if (result == FINGERPRINT_OK) {
+                    result = finger.image2Tz(2);
+                    if (result == FINGERPRINT_OK) {
+                        enrollState = ENROLL_CREATE_MODEL;
+                    } else {
+                        showError("Image convert failed");
+                        enrollState = ENROLL_FAILED;
+                        delay(2000);
+                    }
+                }
+            }
+            break;
+            
+        case ENROLL_CREATE_MODEL:
+            // Create fingerprint model
+            {
+                int result = finger.createModel();
+                if (result == FINGERPRINT_OK) {
+                    enrollState = ENROLL_STORE;
+                } else if (result == FINGERPRINT_ENROLLMISMATCH) {
+                    showError("Prints don't match");
+                    enrollState = ENROLL_FAILED;
+                    delay(2000);
+                } else {
+                    showError("Model creation failed");
+                    enrollState = ENROLL_FAILED;
+                    delay(2000);
+                }
+            }
+            break;
+            
+        case ENROLL_STORE:
+            // Store fingerprint with roll number as ID
+            {
+                enrollFingerprintId = enrollStudentRoll.toInt();
+                int result = finger.storeModel(enrollFingerprintId);
+                if (result == FINGERPRINT_OK) {
+                    Serial.print("Stored fingerprint ID: ");
+                    Serial.println(enrollFingerprintId);
+                    enrollState = ENROLL_CONFIRM_BACKEND;
+                } else {
+                    showError("Store failed");
+                    enrollState = ENROLL_FAILED;
+                    delay(2000);
+                }
+            }
+            break;
+            
+        case ENROLL_CONFIRM_BACKEND:
+            // Confirm enrollment with backend
+            confirmEnrollmentToBackend();
+            break;
+            
+        case ENROLL_SUCCESS:
+            // Show success for 3 seconds then reset
+            delay(3000);
+            enrollState = ENROLL_IDLE;
+            enrollStudentName = "";
+            enrollStudentRoll = "";
+            currentScreen = SCREEN_ENROLL_MODE;
+            enrollState = ENROLL_POLLING;
+            break;
+            
+        case ENROLL_FAILED:
+            // Show failure then reset
+            delay(3000);
+            enrollState = ENROLL_IDLE;
+            enrollStudentName = "";
+            enrollStudentRoll = "";
+            currentScreen = SCREEN_ENROLL_MODE;
+            enrollState = ENROLL_POLLING;
+            break;
+            
+        default:
+            break;
+    }
+}
+
+// ============================================================
+// POLL BACKEND FOR ENROLLMENT QUEUE
+// ============================================================
+void pollBackendForEnrollment() {
+    if (!wifiConnected) {
+        Serial.println("WiFi not connected, skipping poll");
+        return;
+    }
+    
+    HTTPClient http;
+    String url = String(BACKEND_URL) + "/api/poll-status";
+    
+    http.begin(url);
+    http.setTimeout(5000);
+    
+    int httpCode = http.GET();
+    
+    if (httpCode == HTTP_CODE_OK) {
+        String payload = http.getString();
+        Serial.print("Poll response: ");
+        Serial.println(payload);
+        
+        DynamicJsonDocument doc(512);
+        DeserializationError error = deserializeJson(doc, payload);
+        
+        if (!error) {
+            const char* status = doc["status"];
+            
+            if (strcmp(status, "ENROLL") == 0) {
+                enrollStudentName = doc["name"].as<String>();
+                enrollStudentRoll = doc["roll"].as<String>();
+                
+                Serial.print("Student to enroll: ");
+                Serial.print(enrollStudentName);
+                Serial.print(" (");
+                Serial.print(enrollStudentRoll);
+                Serial.println(")");
+                
+                enrollState = ENROLL_STUDENT_FOUND;
+            }
         }
-      } else if (button == 3) {
-        demoActive = false;
-        currentScreen = SCREEN_MAIN_MENU;
-      }
-      break;
-      
-    case SCREEN_OLED_TEST:
-      if (button == 2) {
-        oledTestPattern = (oledTestPattern + 1) % 3;
-      } else if (button == 3) {
-        currentScreen = SCREEN_MAIN_MENU;
-      }
-      break;
-      
-    default:
-      if (button == 3) currentScreen = SCREEN_MAIN_MENU;
-  }
+    } else {
+        Serial.print("Poll failed, HTTP code: ");
+        Serial.println(httpCode);
+    }
+    
+    http.end();
+}
+
+// ============================================================
+// CONFIRM ENROLLMENT TO BACKEND
+// ============================================================
+void confirmEnrollmentToBackend() {
+    if (!wifiConnected) {
+        showError("WiFi disconnected");
+        enrollState = ENROLL_FAILED;
+        return;
+    }
+    
+    HTTPClient http;
+    String url = String(BACKEND_URL) + "/api/confirm-enrollment";
+    
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+    http.setTimeout(5000);
+    
+    DynamicJsonDocument doc(256);
+    doc["roll"] = enrollStudentRoll;
+    doc["fingerprintId"] = enrollFingerprintId;
+    
+    String payload;
+    serializeJson(doc, payload);
+    
+    int httpCode = http.POST(payload);
+    
+    if (httpCode == HTTP_CODE_OK) {
+        Serial.println("Enrollment confirmed with backend");
+        enrollState = ENROLL_SUCCESS;
+    } else {
+        Serial.print("Confirm failed, HTTP code: ");
+        Serial.println(httpCode);
+        showError("Backend confirm failed");
+        enrollState = ENROLL_FAILED;
+    }
+    
+    http.end();
+}
+
+// ============================================================
+// ATTENDANCE FLOW HANDLER
+// ============================================================
+void handleAttendanceFlow() {
+    if (!fpAvailable) {
+        return;
+    }
+    
+    int result = finger.getImage();
+    
+    if (result != FINGERPRINT_OK) {
+        return; // No finger detected
+    }
+    
+    // Convert image
+    result = finger.image2Tz();
+    if (result != FINGERPRINT_OK) {
+        showError("Image error");
+        delay(1000);
+        return;
+    }
+    
+    // Search for match
+    result = finger.fingerSearch();
+    
+    if (result == FINGERPRINT_OK) {
+        int matchedId = finger.fingerID;
+        int confidence = finger.confidence;
+        
+        Serial.print("Fingerprint match! ID: ");
+        Serial.print(matchedId);
+        Serial.print(", Confidence: ");
+        Serial.println(confidence);
+        
+        // Get timestamp
+        String timestamp = getTimestamp();
+        String roll = String(matchedId);
+        
+        // Show success on display
+        display.clearDisplay();
+        display.setTextSize(1);
+        display.setCursor(10, 0);
+        display.println("ATTENDANCE");
+        display.drawLine(0, 10, 128, 10, SH110X_WHITE);
+        display.setCursor(0, 20);
+        display.println("MARKED!");
+        display.print("Roll: ");
+        display.println(roll);
+        display.print("Time: ");
+        display.println(timestamp.substring(11, 19)); // Just time part
+        display.display();
+        
+        // Save to SD card first (offline-first)
+        bool uploaded = false;
+        saveAttendanceToSD(roll, timestamp, false);
+        
+        // Try to upload to backend
+        if (wifiConnected) {
+            uploadAttendanceToBackend(roll, timestamp);
+            uploaded = true;
+            // Update SD record as uploaded
+            // (simplified: in production, update the specific record)
+        }
+        
+        delay(2000);
+        
+    } else if (result == FINGERPRINT_NOTFOUND) {
+        showError("Not registered!");
+        delay(1500);
+    }
+}
+
+// ============================================================
+// GET RTC TIMESTAMP
+// ============================================================
+String getTimestamp() {
+    if (!rtcAvailable) {
+        return "1970-01-01T00:00:00";
+    }
+    
+    DateTime now = rtc.now();
+    char buffer[25];
+    sprintf(buffer, "%04d-%02d-%02dT%02d:%02d:%02d",
+            now.year(), now.month(), now.day(),
+            now.hour(), now.minute(), now.second());
+    return String(buffer);
+}
+
+// ============================================================
+// SAVE ATTENDANCE TO SD CARD
+// ============================================================
+void saveAttendanceToSD(String roll, String timestamp, bool uploaded) {
+    if (!sdAvailable) {
+        Serial.println("SD card not available");
+        return;
+    }
+    
+    // Create filename based on date
+    DateTime now = rtc.now();
+    char filename[30];
+    sprintf(filename, "/attendance/%04d%02d%02d.csv", 
+            now.year(), now.month(), now.day());
+    
+    bool fileExists = SD.exists(filename);
+    File file = SD.open(filename, FILE_APPEND);
+    
+    if (!file) {
+        Serial.println("Failed to open file for writing");
+        return;
+    }
+    
+    // Write header if new file
+    if (!fileExists) {
+        file.println("roll,timestamp,uploaded");
+    }
+    
+    // Write attendance record
+    file.print(roll);
+    file.print(",");
+    file.print(timestamp);
+    file.print(",");
+    file.println(uploaded ? "true" : "false");
+    
+    file.close();
+    
+    Serial.print("Saved attendance to SD: ");
+    Serial.println(filename);
+}
+
+// ============================================================
+// UPLOAD ATTENDANCE TO BACKEND
+// ============================================================
+void uploadAttendanceToBackend(String roll, String timestamp) {
+    if (!wifiConnected) {
+        Serial.println("WiFi not connected, skipping upload");
+        return;
+    }
+    
+    HTTPClient http;
+    String url = String(BACKEND_URL) + "/api/upload-attendance";
+    
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+    http.setTimeout(5000);
+    
+    DynamicJsonDocument doc(256);
+    doc["roll"] = roll;
+    doc["timestamp"] = timestamp;
+    
+    String payload;
+    serializeJson(doc, payload);
+    
+    Serial.print("Uploading attendance: ");
+    Serial.println(payload);
+    
+    int httpCode = http.POST(payload);
+    
+    if (httpCode == HTTP_CODE_OK) {
+        Serial.println("Attendance uploaded successfully");
+    } else {
+        Serial.print("Upload failed, HTTP code: ");
+        Serial.println(httpCode);
+    }
+    
+    http.end();
+}
+
+// ============================================================
+// UTILITY FUNCTIONS
+// ============================================================
+
+void showMessage(const char* line1, const char* line2, const char* line3) {
+    if (!displayAvailable) {
+        Serial.print("MSG: "); Serial.print(line1); Serial.print(" "); Serial.println(line2);
+        return;
+    }
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(0, 15);
+    display.println(line1);
+    display.println(line2);
+    display.println(line3);
+    display.display();
+}
+
+void showError(const char* message) {
+    Serial.print("ERROR: "); Serial.println(message);
+    if (!displayAvailable) return;
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.println("ERROR:");
+    display.setCursor(0, 20);
+    display.println(message);
+    display.display();
+}
+
+void showSuccess(const char* message) {
+    Serial.print("SUCCESS: "); Serial.println(message);
+    if (!displayAvailable) return;
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.println("SUCCESS:");
+    display.setCursor(0, 20);
+    display.println(message);
+    display.display();
 }
